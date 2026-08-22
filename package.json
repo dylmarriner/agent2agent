@@ -1,0 +1,20 @@
+{
+  "name": "agent2agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "node scripts/lint.mjs",
+    "test": "npm run build && node dist/tests/core.test.js",
+    "demo": "npm run build && node dist/examples/collective-demo/src/index.js",
+    "validate": "npm run typecheck && npm run lint && npm run test && npm run demo"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^6.0.0"
+  }
+}
