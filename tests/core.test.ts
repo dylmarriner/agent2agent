@@ -18,7 +18,7 @@ import {
   type RegisteredAgent,
   type TaskRecord,
 } from "../packages/core/src/index.js";
-import { DeterministicAdapter } from "../packages/adapters/src/index.js";
+import { DeterministicAdapter, LocalAuthenticatedCliAdapter, productAdapters } from "../packages/adapters/src/index.js";
 import { ExpertRouter } from "../packages/orchestration/src/index.js";
 import { WorkspaceCoordinator } from "../packages/workspaces/src/index.js";
 import { PermissionEngine, assertSafeHttpTarget } from "../packages/security/src/index.js";
@@ -64,6 +64,44 @@ await test("agent registry enforces adapter registration", () => {
   registry.registerAdapter(adapter);
   registry.register(agent("builder", "deterministic", ["code"]));
   equal(registry.list("code").map((entry) => entry.id), ["builder"]);
+});
+
+await test("local Claude and Codex adapters use existing CLI auth without API keys", async () => {
+  const calls: Array<{ executable: string; args: string[]; env: Record<string, string | undefined>; cwd?: string }> = [];
+  const execute = async (input: { executable: string; args: string[]; env: Record<string, string | undefined>; cwd?: string }) => {
+    calls.push(input);
+    if (input.args.includes("auth") || input.args.includes("status") || input.args.includes("login")) {
+      return { exitCode: 0, stdout: JSON.stringify({ loggedIn: true, authMode: "subscription" }), stderr: "" };
+    }
+    if (input.executable === "claude") {
+      return { exitCode: 0, stdout: JSON.stringify({ result: "claude-ok", session_id: "claude-session-1" }), stderr: "" };
+    }
+    return { exitCode: 0, stdout: [JSON.stringify({ type: "thread.started", thread_id: "codex-thread-1" }), JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "codex-ok" } })].join("\n"), stderr: "" };
+  };
+
+  const claude = new LocalAuthenticatedCliAdapter(productAdapters["claude-code"]!, execute);
+  const codex = new LocalAuthenticatedCliAdapter(productAdapters.codex!, execute);
+  const claudeAgent = agent("claude", "claude-code", ["code"]);
+  const codexAgent = agent("codex", "codex", ["code"]);
+
+  ok((await claude.healthCheck(claudeAgent)).ok);
+  ok((await codex.healthCheck(codexAgent)).ok);
+
+  const claudeSession = await claude.createSession(claudeAgent, { conversationId: "c-local", metadata: { cwd: "/tmp/worktree" } });
+  const claudeResponse = await claude.send(claudeSession, { intent: "ask", content: [{ type: "text", text: "review this" }] }, { conversationId: "c-local" });
+  equal(claudeResponse.content, [{ type: "text", text: "claude-ok" }]);
+  equal(claudeSession.vendorSessionId, "claude-session-1");
+
+  const codexSession = await codex.createSession(codexAgent, { conversationId: "c-local", metadata: { cwd: "/tmp/worktree" } });
+  const codexResponse = await codex.send(codexSession, { intent: "review", content: [{ type: "text", text: "check diff" }] }, { conversationId: "c-local" });
+  equal(codexResponse.content, [{ type: "text", text: "codex-ok" }]);
+  equal(codexSession.vendorSessionId, "codex-thread-1");
+
+  for (const call of calls) {
+    ok(call.env.ANTHROPIC_API_KEY === undefined);
+    ok(call.env.ANTHROPIC_AUTH_TOKEN === undefined);
+    ok(call.env.OPENAI_API_KEY === undefined);
+  }
 });
 
 await test("task DAG exposes only dependency-satisfied tasks", () => {

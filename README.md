@@ -8,7 +8,8 @@ This repository is under active implementation. The first vertical slice is inte
 
 - normalized collaboration/message/agent/task/memory/federation protocol types
 - adapter registry with deterministic local adapter
-- product integration descriptors for Hermes, OpenClaw, OpenCode, Claude Code and Codex
+- product integration descriptors for Hermes, OpenClaw and OpenCode
+- working local authenticated CLI adapters for Claude Code and Codex that reuse existing subscription/ChatGPT login without API keys
 - task DAG with dependency validation
 - bounded swarm runtime with depth/child/runtime/message/cost controls
 - scoped authoritative memory with optional cognitive-provider fallback
@@ -21,7 +22,6 @@ This repository is under active implementation. The first vertical slice is inte
 - workspace/branch isolation planning and review merge gates
 - permission and SSRF policy primitives
 - deterministic end-to-end collective demo
-- PostgreSQL + pgvector initial authoritative schema
 
 ## Run locally
 
@@ -57,8 +57,8 @@ flowchart TB
     Adapters --> Hermes[Hermes]
     Adapters --> OpenClaw[OpenClaw]
     Adapters --> OpenCode[OpenCode]
-    Adapters --> Claude[Claude Agent SDK]
-    Adapters --> Codex[Codex SDK]
+    Adapters --> Claude[Local Claude Code CLI\nsubscription auth]
+    Adapters --> Codex[Local Codex CLI\nChatGPT auth]
     Conversation --> Memory[Hybrid Memory]
     Memory --> Authoritative[PostgreSQL / semantic store]
     Memory -. optional .-> STG[SCOS / STG]
@@ -75,10 +75,24 @@ PostgreSQL remains the intended authoritative application datastore. SCOS/STG is
 
 Current upstream integration decisions are recorded under [`docs/integrations/`](docs/integrations/). Product-specific behavior stays behind adapters. A2A and MCP are transport boundaries, not the internal domain model.
 
+### Local Claude Code and Codex, no API keys
+
+Agent2Agent is designed to reuse the login state owned by the local coding CLIs. Authenticate each CLI once as your normal OS user:
+
+```bash
+claude auth login
+claude auth status
+
+codex login
+codex login status
+```
+
+Do not put `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` into Agent2Agent for these adapters. The local adapter strips those variables before launching the child process and never reads the CLIs' credential files. Claude sessions and Codex threads are resumed using opaque session/thread IDs only.
+
 ## Safety model
 
 The runtime treats agents, remote nodes, memory, packages and model output as untrusted. Current core controls include bounded swarms, scoped memory, duplicate-message prevention, federation loop/replay protection, explicit permissions, merge review gates and SSRF target rejection. Enforcement is designed to live in runtime policy rather than prompts.
 
 ## Status
 
-The full production brief includes PostgreSQL/pgvector persistence runtime, Redis workers, official A2A and MCP SDK transports, real vendor SDK adapters, Git worktree execution, merge-conflict reconciliation, package sandboxing, web control center, OpenTelemetry/Prometheus, Docker, Helm and multi-node live federation. Those are subsequent vertical slices and must not be represented as complete until their tests pass.
+The full production brief includes PostgreSQL/pgvector persistence, Redis workers, official A2A and MCP SDK transports, real vendor SDK adapters, Git worktree execution, merge-conflict reconciliation, package sandboxing, web control center, OpenTelemetry/Prometheus, Docker, Helm and multi-node live federation. Those are subsequent vertical slices and must not be represented as complete until their tests pass.
