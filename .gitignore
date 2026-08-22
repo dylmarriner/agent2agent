@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+.pnpm-store/
+playwright-report/
+test-results/
+*.log
+.DS_Store
+__pycache__/
+.venv/
+*.pyc
+.worktrees/
