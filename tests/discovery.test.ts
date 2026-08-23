@@ -42,6 +42,7 @@ await test("discovers already-configured local CLI agents", async () => {
     ["hermes", "/usr/bin/hermes", "0.13.2", "authenticated", "ready", true, true],
     ["opencode", "/usr/bin/opencode", "1.0.180", "authenticated", "ready", true, true],
   ]);
+  equal(discovered.some((a) => a.type === "openclaw"), false);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
