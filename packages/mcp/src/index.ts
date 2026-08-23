@@ -135,6 +135,13 @@ export function buildMcpRegistrationCommands(repoRoot: string): McpRegistrationC
 
 export type McpHost = keyof McpRegistrationCommands;
 
+export function parseMcpInstallHosts(args: string[]): McpHost[] {
+  const target = args[0] ?? "both";
+  if (target === "both") return ["claude", "codex"];
+  if (target === "claude" || target === "codex") return [target];
+  throw new Error("MCP install target must be one of: claude, codex, both");
+}
+
 export interface CommandResult {
   exitCode: number;
   stdout: string;
