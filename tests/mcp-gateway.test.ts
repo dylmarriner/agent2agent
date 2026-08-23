@@ -21,7 +21,13 @@ type CollectiveGateway = {
   findAgent(input: { query?: string; capability?: string }): Array<Record<string, unknown>>;
   askAgent(input: { agentId: string; prompt: string; conversationId?: string; taskId?: string; workspaceId?: string }): Promise<Record<string, unknown>>;
 };
-type CreateGateway = (options: { registry: AgentRegistry; id?: (prefix: string) => string }) => CollectiveGateway;
+type CreateGatewayOptions = {
+  registry: AgentRegistry;
+  id?: (prefix: string) => string;
+  delegationDepth?: number;
+  maxDelegationDepth?: number;
+};
+type CreateGateway = (options: CreateGatewayOptions) => CollectiveGateway;
 type ToolHandler = (args: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
 type ToolRegistrar = { registerTool(name: string, config: Record<string, unknown>, handler: ToolHandler): unknown };
 
@@ -55,11 +61,11 @@ function makeRegistry(): AgentRegistry {
   return registry;
 }
 
-function makeGateway(): CollectiveGateway {
+function makeGateway(options: Omit<CreateGatewayOptions, "registry" | "id"> = {}): CollectiveGateway {
   const create = (orchestration as unknown as Record<string, unknown>).createCollectiveToolGateway;
   ok(typeof create === "function", "createCollectiveToolGateway must be exported");
   let n = 0;
-  return (create as CreateGateway)({ registry: makeRegistry(), id: (prefix) => `${prefix}-${++n}` });
+  return (create as CreateGateway)({ registry: makeRegistry(), id: (prefix) => `${prefix}-${++n}`, ...options });
 }
 
 await test("collective gateway lists and finds registered agents without exposing arbitrary metadata", () => {
@@ -92,6 +98,17 @@ await test("collective gateway asks a selected agent through its registered adap
   equal(generated.agentId, "claude-local");
   equal(generated.conversationId, "conversation-1");
   equal(generated.content, [{ type: "text", text: "claude:research that" }]);
+});
+
+await test("collective gateway blocks delegation once the nested depth limit is reached", async () => {
+  const gateway = makeGateway({ delegationDepth: 2, maxDelegationDepth: 2 });
+  let message = "";
+  try {
+    await gateway.askAgent({ agentId: "codex-local", prompt: "delegate again" });
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+  equal(message, "Agent2Agent delegation depth limit reached: 2");
 });
 
 await test("MCP layer registers list, find, and ask tools backed by the collective gateway", async () => {
