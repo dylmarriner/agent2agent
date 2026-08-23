@@ -98,6 +98,7 @@ export async function discoverLocalCliAgents(
     if (!executablePath) continue;
 
     const versionProbe = await safeProbe(host, executablePath, spec.versionArgs);
+    const version = versionProbe ? extractVersion(versionProbe.stdout || versionProbe.stderr) : undefined;
     const authProbe = spec.authStatusArgs
       ? await safeProbe(host, executablePath, spec.authStatusArgs)
       : undefined;
@@ -107,7 +108,7 @@ export async function discoverLocalCliAgents(
       type: spec.type,
       executable: spec.executable,
       executablePath,
-      ...(versionProbe ? { version: extractVersion(versionProbe.stdout || versionProbe.stderr) } : {}),
+      ...(version ? { version } : {}),
       authStatus,
       status: authStatus === "authenticated" ? "ready" : "installed",
       supportsSessions: spec.supportsSessions,
@@ -179,11 +180,12 @@ async function runProbe(executable: string, args: string[]): Promise<DiscoveryPr
     let stderr = "";
     let settled = false;
     const maxBytes = 1024 * 1024;
+    let timer: NodeJS.Timeout | undefined;
 
     const finish = (result: DiscoveryProbeResult): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       resolve(result);
     };
 
@@ -205,7 +207,7 @@ async function runProbe(executable: string, args: string[]): Promise<DiscoveryPr
     child.on("error", reject);
     child.on("close", (code: number | null) => finish({ exitCode: code ?? 1, stdout, stderr }));
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       child.kill("SIGKILL");
       finish({ exitCode: 124, stdout, stderr: stderr || "discovery probe timed out" });
     }, 5_000);
