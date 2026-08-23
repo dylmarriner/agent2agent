@@ -25,7 +25,10 @@ export interface LocalCliDiscoverySpec {
   versionArgs: string[];
   authStatusArgs?: string[];
   authProbeKind: AuthProbeKind;
+  supportsStreaming: boolean;
   supportsSessions: boolean;
+  supportsCancellation: boolean;
+  supportsTools: boolean;
   supportsMcp: boolean;
 }
 
@@ -36,7 +39,10 @@ export interface DiscoveredLocalCliAgent {
   version?: string;
   authStatus: LocalCliAuthStatus;
   status: LocalCliStatus;
+  supportsStreaming: boolean;
   supportsSessions: boolean;
+  supportsCancellation: boolean;
+  supportsTools: boolean;
   supportsMcp: boolean;
 }
 
@@ -47,7 +53,10 @@ export const localCliDiscoverySpecs: readonly LocalCliDiscoverySpec[] = [
     versionArgs: ["--version"],
     authStatusArgs: ["auth", "status"],
     authProbeKind: "exit-zero",
+    supportsStreaming: false,
     supportsSessions: true,
+    supportsCancellation: true,
+    supportsTools: true,
     supportsMcp: true,
   },
   {
@@ -56,7 +65,10 @@ export const localCliDiscoverySpecs: readonly LocalCliDiscoverySpec[] = [
     versionArgs: ["--version"],
     authStatusArgs: ["login", "status"],
     authProbeKind: "exit-zero",
+    supportsStreaming: true,
     supportsSessions: true,
+    supportsCancellation: true,
+    supportsTools: true,
     supportsMcp: true,
   },
   {
@@ -65,7 +77,10 @@ export const localCliDiscoverySpecs: readonly LocalCliDiscoverySpec[] = [
     versionArgs: ["--version"],
     authStatusArgs: ["auth", "status"],
     authProbeKind: "nonempty",
+    supportsStreaming: false,
     supportsSessions: true,
+    supportsCancellation: true,
+    supportsTools: true,
     supportsMcp: true,
   },
   {
@@ -74,7 +89,10 @@ export const localCliDiscoverySpecs: readonly LocalCliDiscoverySpec[] = [
     versionArgs: ["--version"],
     authStatusArgs: ["auth", "list"],
     authProbeKind: "opencode-list",
+    supportsStreaming: true,
     supportsSessions: true,
+    supportsCancellation: true,
+    supportsTools: true,
     supportsMcp: true,
   },
   {
@@ -83,7 +101,10 @@ export const localCliDiscoverySpecs: readonly LocalCliDiscoverySpec[] = [
     versionArgs: ["--version"],
     authStatusArgs: ["status", "--json"],
     authProbeKind: "openclaw-status",
+    supportsStreaming: false,
     supportsSessions: false,
+    supportsCancellation: true,
+    supportsTools: true,
     supportsMcp: false,
   },
 ] as const;
@@ -123,7 +144,10 @@ async function discoverOne(
     ...(version ? { version } : {}),
     authStatus,
     status: authStatus === "authenticated" ? "ready" : "installed",
+    supportsStreaming: spec.supportsStreaming,
     supportsSessions: spec.supportsSessions,
+    supportsCancellation: spec.supportsCancellation,
+    supportsTools: spec.supportsTools,
     supportsMcp: spec.supportsMcp,
   };
 }
