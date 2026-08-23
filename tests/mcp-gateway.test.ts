@@ -43,12 +43,12 @@ function makeRegistry(): AgentRegistry {
     {
       id: "codex-local", nodeId: "node-local", canonicalUri: "a2a://node-local/agents/codex-local",
       name: "Codex Local", adapterType: "deterministic", capabilities: ["ask", "review", "debug"],
-      status: "idle", ephemeral: false, metadata: { source: "test", version: "0.149.0" },
+      status: "idle", ephemeral: false, metadata: { source: "test", version: "0.149.0", secretToken: "do-not-expose" },
     },
     {
       id: "claude-local", nodeId: "node-local", canonicalUri: "a2a://node-local/agents/claude-local",
       name: "Claude Code Local", adapterType: "deterministic", capabilities: ["ask", "research", "review"],
-      status: "degraded", ephemeral: false, metadata: { source: "test", version: "2.1.0" },
+      status: "degraded", ephemeral: false, metadata: { source: "test", version: "2.1.0", internalNote: "private" },
     },
   ];
   for (const agent of agents) registry.register(agent);
@@ -62,7 +62,7 @@ function makeGateway(): CollectiveGateway {
   return (create as CreateGateway)({ registry: makeRegistry(), id: (prefix) => `${prefix}-${++n}` });
 }
 
-await test("collective gateway lists and finds registered agents", () => {
+await test("collective gateway lists and finds registered agents without exposing arbitrary metadata", () => {
   const gateway = makeGateway();
   equal(gateway.listAgents({ capability: "review" }), [
     {
