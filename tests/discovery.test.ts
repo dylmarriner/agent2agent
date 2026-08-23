@@ -24,14 +24,15 @@ await test("discovers already-configured local CLI agents", async () => {
   const host: DiscoveryHost = {
     async locate(executable) { return paths[executable]; },
     async run(executable, args) {
+      const name = executable.split(/[\\/]/).at(-1) ?? executable;
       if (args.includes("--version")) {
         const versions: Record<string, string> = { claude: "Claude Code 2.1.0", codex: "codex-cli 0.149.0", hermes: "Hermes Agent 0.13.2", opencode: "1.0.180" };
-        return { exitCode: 0, stdout: versions[executable] ?? "unknown", stderr: "" };
+        return { exitCode: 0, stdout: versions[name] ?? "unknown", stderr: "" };
       }
-      if (executable === "claude") return { exitCode: 0, stdout: "logged in", stderr: "" };
-      if (executable === "codex") return { exitCode: 0, stdout: "Logged in using ChatGPT", stderr: "" };
-      if (executable === "hermes") return { exitCode: 0, stdout: "Agent ready", stderr: "" };
-      if (executable === "opencode") return { exitCode: 0, stdout: "anthropic\nopenai", stderr: "" };
+      if (name === "claude") return { exitCode: 0, stdout: "logged in", stderr: "" };
+      if (name === "codex") return { exitCode: 0, stdout: "Logged in using ChatGPT", stderr: "" };
+      if (name === "hermes") return { exitCode: 0, stdout: "Agent ready", stderr: "" };
+      if (name === "opencode") return { exitCode: 0, stdout: "anthropic\nopenai", stderr: "" };
       return { exitCode: 1, stdout: "", stderr: "unsupported" };
     },
   };
