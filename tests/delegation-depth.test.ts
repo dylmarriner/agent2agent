@@ -1,4 +1,5 @@
 import { LocalAuthenticatedCliAdapter, productAdapters } from "../packages/adapters/src/index.js";
+import { createLocalCollectiveMcpRuntime } from "../packages/mcp/src/index.js";
 import type { RegisteredAgent } from "../packages/protocol/src/index.js";
 
 let passed = 0;
@@ -38,6 +39,28 @@ await test("local CLI adapter propagates Agent2Agent delegation depth to nested 
   );
   equal(calls.length, 1);
   equal(calls[0]?.env.AGENT2AGENT_DELEGATION_DEPTH, "2");
+});
+
+await test("nested MCP runtime inherits delegation depth and applies the configured limit", async () => {
+  const previousDepth = process.env.AGENT2AGENT_DELEGATION_DEPTH;
+  const previousMax = process.env.AGENT2AGENT_MAX_DELEGATION_DEPTH;
+  process.env.AGENT2AGENT_DELEGATION_DEPTH = "3";
+  process.env.AGENT2AGENT_MAX_DELEGATION_DEPTH = "3";
+  try {
+    const runtime = await createLocalCollectiveMcpRuntime("depth-test");
+    let message = "";
+    try {
+      await runtime.gateway.askAgent({ agentId: "missing-agent", prompt: "delegate again" });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    equal(message, "Agent2Agent delegation depth limit reached: 3");
+  } finally {
+    if (previousDepth === undefined) delete process.env.AGENT2AGENT_DELEGATION_DEPTH;
+    else process.env.AGENT2AGENT_DELEGATION_DEPTH = previousDepth;
+    if (previousMax === undefined) delete process.env.AGENT2AGENT_MAX_DELEGATION_DEPTH;
+    else process.env.AGENT2AGENT_MAX_DELEGATION_DEPTH = previousMax;
+  }
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
