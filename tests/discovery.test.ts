@@ -26,20 +26,27 @@ function configuredHost(): DiscoveryHost {
     codex: "/usr/bin/codex",
     hermes: "/usr/bin/hermes",
     opencode: "/usr/bin/opencode",
-    openclaw: undefined,
+    openclaw: "/usr/bin/openclaw",
   };
   return {
     async locate(executable) { return paths[executable]; },
     async run(executable, args) {
       const name = executable.split(/[\\/]/).at(-1) ?? executable;
       if (args.includes("--version")) {
-        const versions: Record<string, string> = { claude: "Claude Code 2.1.0", codex: "codex-cli 0.149.0", hermes: "Hermes Agent 0.13.2", opencode: "1.0.180" };
+        const versions: Record<string, string> = {
+          claude: "Claude Code 2.1.0",
+          codex: "codex-cli 0.149.0",
+          hermes: "Hermes Agent 0.13.2",
+          opencode: "1.0.180",
+          openclaw: "OpenClaw 2026.8.0",
+        };
         return { exitCode: 0, stdout: versions[name] ?? "unknown", stderr: "" };
       }
       if (name === "claude") return { exitCode: 0, stdout: "logged in", stderr: "" };
       if (name === "codex") return { exitCode: 0, stdout: "Logged in using ChatGPT", stderr: "" };
       if (name === "hermes") return { exitCode: 0, stdout: "Agent ready", stderr: "" };
       if (name === "opencode") return { exitCode: 0, stdout: "anthropic\nopenai", stderr: "" };
+      if (name === "openclaw") return { exitCode: 0, stdout: JSON.stringify({ ok: true, gateway: { status: "ready" } }), stderr: "" };
       return { exitCode: 1, stdout: "", stderr: "unsupported" };
     },
   };
@@ -54,8 +61,8 @@ await test("discovers already-configured local CLI agents", async () => {
     ["codex", "/usr/bin/codex", "0.149.0", "authenticated", "ready", true, true],
     ["hermes", "/usr/bin/hermes", "0.13.2", "authenticated", "ready", true, true],
     ["opencode", "/usr/bin/opencode", "1.0.180", "authenticated", "ready", true, true],
+    ["openclaw", "/usr/bin/openclaw", "2026.8.0", "authenticated", "ready", false, false],
   ]);
-  equal(discovered.some((a) => a.type === "openclaw"), false);
 });
 
 await test("registers discovered local CLIs as routable collective agents", async () => {
@@ -70,8 +77,9 @@ await test("registers discovered local CLIs as routable collective agents", asyn
     ["codex-local", "codex", "idle", "a2a://node-local/agents/codex-local"],
     ["hermes-local", "hermes", "idle", "a2a://node-local/agents/hermes-local"],
     ["opencode-local", "opencode", "idle", "a2a://node-local/agents/opencode-local"],
+    ["openclaw-local", "openclaw", "idle", "a2a://node-local/agents/openclaw-local"],
   ]);
-  equal(registry.list().map((agent) => agent.id), ["claude-local", "codex-local", "hermes-local", "opencode-local"]);
+  equal(registry.list().map((agent) => agent.id), ["claude-local", "codex-local", "hermes-local", "opencode-local", "openclaw-local"]);
   equal(registry.get("claude-local").metadata, {
     source: "local-cli-discovery",
     executablePath: "/usr/bin/claude",
@@ -82,6 +90,7 @@ await test("registers discovered local CLIs as routable collective agents", asyn
   });
   ok(registry.adapterFor("claude-local").type === "claude-code");
   ok(registry.adapterFor("codex-local").type === "codex");
+  ok(registry.adapterFor("openclaw-local").type === "openclaw");
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
