@@ -65,6 +65,28 @@ await test("discovers already-configured local CLI agents", async () => {
   ]);
 });
 
+await test("does not call empty or unhealthy CLI auth state ready", async () => {
+  const discover = (adapters as unknown as Record<string, unknown>).discoverLocalCliAgents;
+  ok(typeof discover === "function");
+  const host: DiscoveryHost = {
+    async locate(executable) {
+      if (executable === "opencode" || executable === "openclaw") return `/usr/bin/${executable}`;
+      return undefined;
+    },
+    async run(executable, args) {
+      const name = executable.split(/[\\/]/).at(-1) ?? executable;
+      if (args.includes("--version")) return { exitCode: 0, stdout: `${name} 1.2.3`, stderr: "" };
+      if (name === "opencode") return { exitCode: 0, stdout: "", stderr: "" };
+      return { exitCode: 0, stdout: JSON.stringify({ ok: false, gateway: { status: "offline" } }), stderr: "" };
+    },
+  };
+  const discovered = await (discover as DiscoverFn)({ host });
+  equal(discovered.map((a) => [a.type, a.authStatus, a.status]), [
+    ["opencode", "unauthenticated", "installed"],
+    ["openclaw", "unauthenticated", "installed"],
+  ]);
+});
+
 await test("registers discovered local CLIs as routable collective agents", async () => {
   const register = (adapters as unknown as Record<string, unknown>).discoverAndRegisterLocalCliAgents;
   ok(typeof register === "function", "discoverAndRegisterLocalCliAgents must be exported");
