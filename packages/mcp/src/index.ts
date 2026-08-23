@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio, type StdioServerHandle } from "@modelcontextprotocol/server/stdio";
@@ -131,3 +132,52 @@ export function buildMcpRegistrationCommands(repoRoot: string): McpRegistrationC
     codex: ["codex", "mcp", "add", "agent2agent", "--", "node", serverPath],
   };
 }
+
+export type McpHost = keyof McpRegistrationCommands;
+
+export interface CommandResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+export type CommandExecutor = (command: string, args: string[]) => Promise<CommandResult>;
+
+export interface InstallMcpHostsOptions {
+  repoRoot: string;
+  hosts: McpHost[];
+  execute?: CommandExecutor;
+}
+
+export async function installMcpHosts(options: InstallMcpHostsOptions): Promise<Partial<Record<McpHost, CommandResult>>> {
+  const commands = buildMcpRegistrationCommands(options.repoRoot);
+  const execute = options.execute ?? executeCommand;
+  const results: Partial<Record<McpHost, CommandResult>> = {};
+
+  for (const host of options.hosts) {
+    const argv = commands[host];
+    const result = await execute(argv[0]!, argv.slice(1));
+    if (result.exitCode !== 0) {
+      const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`;
+      throw new Error(`Failed to register Agent2Agent MCP with ${host}: ${detail}`);
+    }
+    results[host] = result;
+  }
+
+  return results;
+}
+
+export const executeCommand: CommandExecutor = async (command, args) => new Promise((resolveResult, reject) => {
+  const child = spawn(command, args, {
+    shell: false,
+    windowsHide: true,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+  child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+  child.on("error", reject);
+  child.on("close", (code) => resolveResult({ exitCode: code ?? 1, stdout, stderr }));
+});
