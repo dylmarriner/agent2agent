@@ -399,7 +399,10 @@ export async function discoverAndRegisterLocalCliAgents(
         executablePath: runtime.executablePath,
         ...(runtime.version ? { version: runtime.version } : {}),
         authStatus: runtime.authStatus,
+        supportsStreaming: runtime.supportsStreaming,
         supportsSessions: runtime.supportsSessions,
+        supportsCancellation: runtime.supportsCancellation,
+        supportsTools: runtime.supportsTools,
         supportsMcp: runtime.supportsMcp,
       },
     });
