@@ -6,6 +6,7 @@ import { delimiter, join } from "node:path";
 export type LocalCliAgentType = "claude-code" | "codex" | "hermes" | "opencode" | "openclaw";
 export type LocalCliAuthStatus = "authenticated" | "unauthenticated" | "unknown";
 export type LocalCliStatus = "ready" | "installed";
+export type AuthProbeKind = "exit-zero" | "nonempty" | "opencode-list" | "openclaw-status";
 
 export interface DiscoveryProbeResult {
   exitCode: number;
@@ -23,6 +24,7 @@ export interface LocalCliDiscoverySpec {
   executable: string;
   versionArgs: string[];
   authStatusArgs?: string[];
+  authProbeKind: AuthProbeKind;
   supportsSessions: boolean;
   supportsMcp: boolean;
 }
@@ -44,6 +46,7 @@ export const localCliDiscoverySpecs: readonly LocalCliDiscoverySpec[] = [
     executable: "claude",
     versionArgs: ["--version"],
     authStatusArgs: ["auth", "status"],
+    authProbeKind: "exit-zero",
     supportsSessions: true,
     supportsMcp: true,
   },
@@ -52,6 +55,7 @@ export const localCliDiscoverySpecs: readonly LocalCliDiscoverySpec[] = [
     executable: "codex",
     versionArgs: ["--version"],
     authStatusArgs: ["login", "status"],
+    authProbeKind: "exit-zero",
     supportsSessions: true,
     supportsMcp: true,
   },
@@ -60,6 +64,7 @@ export const localCliDiscoverySpecs: readonly LocalCliDiscoverySpec[] = [
     executable: "hermes",
     versionArgs: ["--version"],
     authStatusArgs: ["auth", "status"],
+    authProbeKind: "nonempty",
     supportsSessions: true,
     supportsMcp: true,
   },
@@ -68,6 +73,7 @@ export const localCliDiscoverySpecs: readonly LocalCliDiscoverySpec[] = [
     executable: "opencode",
     versionArgs: ["--version"],
     authStatusArgs: ["auth", "list"],
+    authProbeKind: "opencode-list",
     supportsSessions: true,
     supportsMcp: true,
   },
@@ -76,7 +82,8 @@ export const localCliDiscoverySpecs: readonly LocalCliDiscoverySpec[] = [
     executable: "openclaw",
     versionArgs: ["--version"],
     authStatusArgs: ["status", "--json"],
-    supportsSessions: true,
+    authProbeKind: "openclaw-status",
+    supportsSessions: false,
     supportsMcp: false,
   },
 ] as const;
@@ -91,32 +98,34 @@ export async function discoverLocalCliAgents(
 ): Promise<DiscoveredLocalCliAgent[]> {
   const host = options.host ?? defaultLocalCliDiscoveryHost;
   const specs = options.specs ?? localCliDiscoverySpecs;
-  const discovered: DiscoveredLocalCliAgent[] = [];
+  const discovered = await Promise.all(specs.map((spec) => discoverOne(host, spec)));
+  return discovered.filter((entry): entry is DiscoveredLocalCliAgent => entry !== undefined);
+}
 
-  for (const spec of specs) {
-    const executablePath = await host.locate(spec.executable);
-    if (!executablePath) continue;
+async function discoverOne(
+  host: LocalCliDiscoveryHost,
+  spec: LocalCliDiscoverySpec,
+): Promise<DiscoveredLocalCliAgent | undefined> {
+  const executablePath = await host.locate(spec.executable);
+  if (!executablePath) return undefined;
 
-    const versionProbe = await safeProbe(host, executablePath, spec.versionArgs);
-    const version = versionProbe ? extractVersion(versionProbe.stdout || versionProbe.stderr) : undefined;
-    const authProbe = spec.authStatusArgs
-      ? await safeProbe(host, executablePath, spec.authStatusArgs)
-      : undefined;
-    const authStatus = classifyAuthStatus(authProbe);
+  const [versionProbe, authProbe] = await Promise.all([
+    safeProbe(host, executablePath, spec.versionArgs),
+    spec.authStatusArgs ? safeProbe(host, executablePath, spec.authStatusArgs) : Promise.resolve(undefined),
+  ]);
+  const version = versionProbe ? extractVersion(versionProbe.stdout || versionProbe.stderr) : undefined;
+  const authStatus = classifyAuthStatus(authProbe, spec.authProbeKind);
 
-    discovered.push({
-      type: spec.type,
-      executable: spec.executable,
-      executablePath,
-      ...(version ? { version } : {}),
-      authStatus,
-      status: authStatus === "authenticated" ? "ready" : "installed",
-      supportsSessions: spec.supportsSessions,
-      supportsMcp: spec.supportsMcp,
-    });
-  }
-
-  return discovered;
+  return {
+    type: spec.type,
+    executable: spec.executable,
+    executablePath,
+    ...(version ? { version } : {}),
+    authStatus,
+    status: authStatus === "authenticated" ? "ready" : "installed",
+    supportsSessions: spec.supportsSessions,
+    supportsMcp: spec.supportsMcp,
+  };
 }
 
 async function safeProbe(
@@ -131,10 +140,32 @@ async function safeProbe(
   }
 }
 
-function classifyAuthStatus(result: DiscoveryProbeResult | undefined): LocalCliAuthStatus {
+function classifyAuthStatus(result: DiscoveryProbeResult | undefined, kind: AuthProbeKind): LocalCliAuthStatus {
   if (!result) return "unknown";
   if (result.exitCode !== 0) return "unauthenticated";
-  return `${result.stdout}\n${result.stderr}`.trim().length > 0 ? "authenticated" : "unknown";
+  const text = `${result.stdout}\n${result.stderr}`.trim();
+
+  if (kind === "exit-zero") return "authenticated";
+  if (kind === "nonempty") return text.length > 0 ? "authenticated" : "unauthenticated";
+  if (kind === "opencode-list") {
+    if (!text || /no\s+(authenticated\s+)?(providers?|credentials?|accounts?)/i.test(text)) return "unauthenticated";
+    return "authenticated";
+  }
+  if (kind === "openclaw-status") {
+    try {
+      const value = JSON.parse(result.stdout) as Record<string, unknown>;
+      if (value.ok === true) return "authenticated";
+      const gateway = value.gateway;
+      if (gateway && typeof gateway === "object") {
+        const status = (gateway as Record<string, unknown>).status;
+        if (typeof status === "string" && ["ready", "running", "connected", "healthy"].includes(status.toLowerCase())) return "authenticated";
+      }
+      return "unauthenticated";
+    } catch {
+      return "unknown";
+    }
+  }
+  return "unknown";
 }
 
 function extractVersion(output: string): string | undefined {
@@ -182,13 +213,22 @@ async function runProbe(executable: string, args: string[]): Promise<DiscoveryPr
     const maxBytes = 1024 * 1024;
     let timer: NodeJS.Timeout | undefined;
 
+    const cleanup = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    };
     const finish = (result: DiscoveryProbeResult): void => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      cleanup();
       resolve(result);
     };
-
+    const fail = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
     const append = (current: string, chunk: Buffer): string => {
       const next = current + chunk.toString("utf8");
       if (Buffer.byteLength(next, "utf8") > maxBytes) {
@@ -199,12 +239,12 @@ async function runProbe(executable: string, args: string[]): Promise<DiscoveryPr
     };
 
     child.stdout?.on("data", (chunk: Buffer) => {
-      try { stdout = append(stdout, chunk); } catch (error) { reject(error); }
+      try { stdout = append(stdout, chunk); } catch (error) { fail(error); }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      try { stderr = append(stderr, chunk); } catch (error) { reject(error); }
+      try { stderr = append(stderr, chunk); } catch (error) { fail(error); }
     });
-    child.on("error", reject);
+    child.on("error", fail);
     child.on("close", (code: number | null) => finish({ exitCode: code ?? 1, stdout, stderr }));
 
     timer = setTimeout(() => {
