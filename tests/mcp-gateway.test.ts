@@ -22,6 +22,8 @@ type CollectiveGateway = {
   askAgent(input: { agentId: string; prompt: string; conversationId?: string; taskId?: string; workspaceId?: string }): Promise<Record<string, unknown>>;
 };
 type CreateGateway = (options: { registry: AgentRegistry; id?: (prefix: string) => string }) => CollectiveGateway;
+type ToolHandler = (args: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+type ToolRegistrar = { registerTool(name: string, config: Record<string, unknown>, handler: ToolHandler): unknown };
 
 function makeRegistry(): AgentRegistry {
   const events = new EventStore("node-local", createMonotonicIdFactory("mcp-test"));
@@ -53,11 +55,15 @@ function makeRegistry(): AgentRegistry {
   return registry;
 }
 
-await test("collective gateway lists and finds registered agents", () => {
+function makeGateway(): CollectiveGateway {
   const create = (orchestration as unknown as Record<string, unknown>).createCollectiveToolGateway;
   ok(typeof create === "function", "createCollectiveToolGateway must be exported");
-  const gateway = (create as CreateGateway)({ registry: makeRegistry(), id: (() => { let n = 0; return (prefix) => `${prefix}-${++n}`; })() });
+  let n = 0;
+  return (create as CreateGateway)({ registry: makeRegistry(), id: (prefix) => `${prefix}-${++n}` });
+}
 
+await test("collective gateway lists and finds registered agents", () => {
+  const gateway = makeGateway();
   equal(gateway.listAgents({ capability: "review" }), [
     {
       id: "codex-local", name: "Codex Local", canonicalUri: "a2a://node-local/agents/codex-local",
@@ -73,11 +79,7 @@ await test("collective gateway lists and finds registered agents", () => {
 });
 
 await test("collective gateway asks a selected agent through its registered adapter", async () => {
-  const create = (orchestration as unknown as Record<string, unknown>).createCollectiveToolGateway;
-  ok(typeof create === "function", "createCollectiveToolGateway must be exported");
-  let n = 0;
-  const gateway = (create as CreateGateway)({ registry: makeRegistry(), id: (prefix) => `${prefix}-${++n}` });
-
+  const gateway = makeGateway();
   equal(await gateway.askAgent({ agentId: "codex-local", prompt: "inspect this", conversationId: "conv-explicit" }), {
     agentId: "codex-local",
     conversationId: "conv-explicit",
@@ -90,6 +92,35 @@ await test("collective gateway asks a selected agent through its registered adap
   equal(generated.agentId, "claude-local");
   equal(generated.conversationId, "conversation-1");
   equal(generated.content, [{ type: "text", text: "claude:research that" }]);
+});
+
+await test("MCP layer registers list, find, and ask tools backed by the collective gateway", async () => {
+  const modulePath = "../packages/mcp/src/index.js";
+  const mcp = await import(modulePath) as Record<string, unknown>;
+  const register = mcp.registerCollectiveMcpTools;
+  ok(typeof register === "function", "registerCollectiveMcpTools must be exported");
+
+  const tools = new Map<string, { config: Record<string, unknown>; handler: ToolHandler }>();
+  const server: ToolRegistrar = {
+    registerTool(name, config, handler) { tools.set(name, { config, handler }); return {}; },
+  };
+  (register as (server: ToolRegistrar, gateway: CollectiveGateway) => void)(server, makeGateway());
+  equal([...tools.keys()], ["list_agents", "find_agent", "ask_agent"]);
+
+  const listed = await tools.get("list_agents")!.handler({ capability: "debug" });
+  equal(listed.structuredContent, { agents: [{
+    id: "codex-local", name: "Codex Local", canonicalUri: "a2a://node-local/agents/codex-local",
+    adapterType: "deterministic", status: "idle", capabilities: ["ask", "review", "debug"], metadata: { source: "test", version: "0.149.0" },
+  }] });
+
+  const found = await tools.get("find_agent")!.handler({ query: "claude", capability: "review" });
+  equal((found.structuredContent as { agents: Array<{ id: string }> }).agents.map((agent) => agent.id), ["claude-local"]);
+
+  const asked = await tools.get("ask_agent")!.handler({ agentId: "codex-local", prompt: "review it", conversationId: "conv-mcp" });
+  equal(asked.structuredContent, {
+    agentId: "codex-local", conversationId: "conv-mcp",
+    content: [{ type: "text", text: "codex:review it" }], artifacts: [], vendorMessageId: "codex-msg-1",
+  });
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
