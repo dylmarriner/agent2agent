@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio, type StdioServerHandle } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
@@ -116,4 +117,17 @@ export async function createLocalCollectiveMcpRuntime(nodeId = process.env.AGENT
 export async function startLocalCollectiveMcpStdio(): Promise<StdioServerHandle> {
   const runtime = await createLocalCollectiveMcpRuntime();
   return serveCollectiveMcpStdio(runtime.gateway);
+}
+
+export interface McpRegistrationCommands {
+  claude: string[];
+  codex: string[];
+}
+
+export function buildMcpRegistrationCommands(repoRoot: string): McpRegistrationCommands {
+  const serverPath = resolve(repoRoot, "dist/packages/mcp/src/stdio.js");
+  return {
+    claude: ["claude", "mcp", "add", "agent2agent", "--scope", "user", "--", "node", serverPath],
+    codex: ["codex", "mcp", "add", "agent2agent", "--", "node", serverPath],
+  };
 }
