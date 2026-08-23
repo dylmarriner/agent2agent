@@ -54,7 +54,7 @@ export interface CollectiveAgentSummary {
   adapterType: string;
   status: RegisteredAgent["status"];
   capabilities: string[];
-  metadata: Record<string, unknown>;
+  metadata: Record<string, string | number | boolean | null>;
 }
 
 export interface FindAgentInput {
@@ -134,6 +134,18 @@ export function createCollectiveToolGateway(options: CreateCollectiveToolGateway
   return { listAgents, findAgent, askAgent };
 }
 
+const PUBLIC_AGENT_METADATA_KEYS = [
+  "source",
+  "version",
+  "authStatus",
+  "executablePath",
+  "supportsStreaming",
+  "supportsSessions",
+  "supportsCancellation",
+  "supportsTools",
+  "supportsMcp",
+] as const;
+
 function toAgentSummary(agent: RegisteredAgent): CollectiveAgentSummary {
   return {
     id: agent.id,
@@ -142,6 +154,17 @@ function toAgentSummary(agent: RegisteredAgent): CollectiveAgentSummary {
     adapterType: agent.adapterType,
     status: agent.status,
     capabilities: [...agent.capabilities],
-    metadata: structuredClone(agent.metadata),
+    metadata: publicAgentMetadata(agent.metadata),
   };
+}
+
+function publicAgentMetadata(metadata: Record<string, unknown>): Record<string, string | number | boolean | null> {
+  const result: Record<string, string | number | boolean | null> = {};
+  for (const key of PUBLIC_AGENT_METADATA_KEYS) {
+    const value = metadata[key];
+    if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      result[key] = value;
+    }
+  }
+  return result;
 }
