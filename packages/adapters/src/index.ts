@@ -303,3 +303,5 @@ export class DeterministicAdapter implements AgentAdapter {
     return handler({ id: session.agentId } as RegisteredAgent, request, context);
   }
 }
+
+export * from "./discovery.js";
