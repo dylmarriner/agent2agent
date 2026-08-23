@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "node scripts/lint.mjs",
-    "test": "npm run build && node dist/tests/core.test.js && node dist/tests/discovery.test.js && node dist/tests/mcp-gateway.test.js && node dist/tests/mcp-registration.test.js",
+    "test": "npm run build && node dist/tests/core.test.js && node dist/tests/discovery.test.js && node dist/tests/mcp-gateway.test.js && node dist/tests/mcp-registration.test.js && node dist/tests/mcp-stdio.test.js",
     "demo": "npm run build && node dist/examples/collective-demo/src/index.js",
     "mcp:stdio": "npm run build --silent && node dist/packages/mcp/src/stdio.js",
     "mcp:install": "npm run build --silent && node dist/packages/mcp/src/install.js",
@@ -20,6 +20,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^24.0.0",
     "typescript": "^6.0.0"
   }
