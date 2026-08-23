@@ -56,12 +56,23 @@ await test("discovers already-configured local CLI agents", async () => {
   const discover = (adapters as unknown as Record<string, unknown>).discoverLocalCliAgents;
   ok(typeof discover === "function", "discoverLocalCliAgents must be exported");
   const discovered = await (discover as DiscoverFn)({ host: configuredHost() });
-  equal(discovered.map((a) => [a.type, a.executablePath, a.version, a.authStatus, a.status, a.supportsSessions, a.supportsMcp]), [
-    ["claude-code", "/usr/bin/claude", "2.1.0", "authenticated", "ready", true, true],
-    ["codex", "/usr/bin/codex", "0.149.0", "authenticated", "ready", true, true],
-    ["hermes", "/usr/bin/hermes", "0.13.2", "authenticated", "ready", true, true],
-    ["opencode", "/usr/bin/opencode", "1.0.180", "authenticated", "ready", true, true],
-    ["openclaw", "/usr/bin/openclaw", "2026.8.0", "authenticated", "ready", false, false],
+  equal(discovered.map((a) => [
+    a.type,
+    a.executablePath,
+    a.version,
+    a.authStatus,
+    a.status,
+    a.supportsStreaming,
+    a.supportsSessions,
+    a.supportsCancellation,
+    a.supportsTools,
+    a.supportsMcp,
+  ]), [
+    ["claude-code", "/usr/bin/claude", "2.1.0", "authenticated", "ready", false, true, true, true, true],
+    ["codex", "/usr/bin/codex", "0.149.0", "authenticated", "ready", true, true, true, true, true],
+    ["hermes", "/usr/bin/hermes", "0.13.2", "authenticated", "ready", false, true, true, true, true],
+    ["opencode", "/usr/bin/opencode", "1.0.180", "authenticated", "ready", true, true, true, true, true],
+    ["openclaw", "/usr/bin/openclaw", "2026.8.0", "authenticated", "ready", false, false, true, true, false],
   ]);
 });
 
@@ -107,7 +118,10 @@ await test("registers discovered local CLIs as routable collective agents", asyn
     executablePath: "/usr/bin/claude",
     version: "2.1.0",
     authStatus: "authenticated",
+    supportsStreaming: false,
     supportsSessions: true,
+    supportsCancellation: true,
+    supportsTools: true,
     supportsMcp: true,
   });
   ok(registry.adapterFor("claude-local").type === "claude-code");
