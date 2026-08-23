@@ -17,7 +17,7 @@ export interface CommandSpec {
   resumeArgs?: (sessionId: string, prompt: string) => string[];
   authStatusArgs?: string[];
   output: "text" | "json" | "jsonl";
-  responseParser?: "claude-json" | "codex-jsonl" | "text";
+  responseParser?: "claude-json" | "codex-jsonl" | "openclaw-json" | "text";
   preferredIntegration: "sdk" | "gateway" | "http" | "cli" | "mcp";
   authentication?: "local-session" | "external";
 }
@@ -35,6 +35,7 @@ export const productAdapters: Record<string, ProductAdapterDescriptor> = {
       executable: "hermes",
       args: ["chat", "-q", "{prompt}"],
       resumeArgs: (sessionId, prompt) => ["chat", "--resume", sessionId, "-q", prompt],
+      authStatusArgs: ["auth", "status"],
       output: "text",
       responseParser: "text",
       preferredIntegration: "mcp",
@@ -44,7 +45,16 @@ export const productAdapters: Record<string, ProductAdapterDescriptor> = {
   },
   openclaw: {
     type: "openclaw",
-    notes: "Prefer the documented OpenClaw Gateway client/protocol for external apps; plugin runtime is for in-process integrations.",
+    command: {
+      executable: "openclaw",
+      args: ["agent", "exec", "{prompt}", "--json"],
+      authStatusArgs: ["status", "--json"],
+      output: "json",
+      responseParser: "openclaw-json",
+      preferredIntegration: "gateway",
+      authentication: "external",
+    },
+    notes: "Prefer the documented OpenClaw Gateway for durable sessions; `openclaw agent exec --json` is the concrete local headless fallback and uses the user's existing OpenClaw configuration.",
   },
   opencode: {
     type: "opencode",
@@ -52,6 +62,7 @@ export const productAdapters: Record<string, ProductAdapterDescriptor> = {
       executable: "opencode",
       args: ["run", "--format", "json", "{prompt}"],
       resumeArgs: (sessionId, prompt) => ["run", "--format", "json", "--session", sessionId, prompt],
+      authStatusArgs: ["auth", "list"],
       output: "jsonl",
       preferredIntegration: "http",
       authentication: "external",
@@ -276,6 +287,18 @@ function parseLocalResponse(command: CommandSpec, stdout: string): { text: strin
     }
     return { text: texts.join("\n").trim() || stdout.trim(), ...(sessionId ? { sessionId } : {}), ...(vendorMessageId ? { vendorMessageId } : {}) };
   }
+  if (parser === "openclaw-json") {
+    const value = JSON.parse(stdout) as Record<string, unknown>;
+    const final = typeof value.final === "string"
+      ? value.final
+      : typeof value.response === "string"
+        ? value.response
+        : typeof value.message === "string"
+          ? value.message
+          : JSON.stringify(value);
+    const sessionId = typeof value.sessionId === "string" ? value.sessionId : undefined;
+    return { text: final, ...(sessionId ? { sessionId } : {}) };
+  }
   return { text: stdout.trim() };
 }
 
@@ -302,6 +325,89 @@ export class DeterministicAdapter implements AgentAdapter {
     if (!handler) return { content: [{ type: "text", text: `${session.agentId} received ${request.intent}` }], artifacts: [] };
     return handler({ id: session.agentId } as RegisteredAgent, request, context);
   }
+}
+
+export interface LocalAgentRegistry {
+  registerAdapter(adapter: AgentAdapter): void;
+  register(agent: RegisteredAgent): RegisteredAgent;
+  list(): RegisteredAgent[];
+}
+
+export interface DiscoverAndRegisterLocalCliAgentsOptions {
+  registry: LocalAgentRegistry;
+  nodeId: string;
+  host?: import("./discovery.js").LocalCliDiscoveryHost;
+}
+
+const LOCAL_AGENT_IDS: Record<string, string> = {
+  "claude-code": "claude-local",
+  codex: "codex-local",
+  hermes: "hermes-local",
+  opencode: "opencode-local",
+  openclaw: "openclaw-local",
+};
+
+const LOCAL_AGENT_NAMES: Record<string, string> = {
+  "claude-code": "Claude Code Local",
+  codex: "Codex Local",
+  hermes: "Hermes Local",
+  opencode: "OpenCode Local",
+  openclaw: "OpenClaw Local",
+};
+
+export async function discoverAndRegisterLocalCliAgents(
+  options: DiscoverAndRegisterLocalCliAgentsOptions,
+): Promise<RegisteredAgent[]> {
+  const { discoverLocalCliAgents } = await import("./discovery.js");
+  const discovered = await discoverLocalCliAgents({ ...(options.host ? { host: options.host } : {}) });
+  const currentAgents = options.registry.list();
+  const adapterTypes = new Set(currentAgents.map((agent) => agent.adapterType));
+  const registered: RegisteredAgent[] = [];
+
+  for (const runtime of discovered) {
+    const descriptor = productAdapters[runtime.type];
+    const id = LOCAL_AGENT_IDS[runtime.type];
+    if (!descriptor?.command || !id) continue;
+
+    const existing = currentAgents.find((agent) => agent.id === id);
+    if (existing) {
+      registered.push(existing);
+      continue;
+    }
+
+    const resolvedDescriptor: ProductAdapterDescriptor = {
+      ...descriptor,
+      command: { ...descriptor.command, executable: runtime.executablePath },
+    };
+    const adapter = new LocalAuthenticatedCliAdapter(resolvedDescriptor);
+    if (!adapterTypes.has(adapter.type)) {
+      options.registry.registerAdapter(adapter);
+      adapterTypes.add(adapter.type);
+    }
+    const capabilities = await adapter.discover();
+    const agent = options.registry.register({
+      id,
+      nodeId: options.nodeId,
+      canonicalUri: `a2a://${options.nodeId}/agents/${id}`,
+      name: LOCAL_AGENT_NAMES[runtime.type] ?? runtime.type,
+      adapterType: runtime.type,
+      capabilities: capabilities.capabilities,
+      status: runtime.authStatus === "authenticated" ? "idle" : "degraded",
+      ephemeral: false,
+      metadata: {
+        source: "local-cli-discovery",
+        executablePath: runtime.executablePath,
+        ...(runtime.version ? { version: runtime.version } : {}),
+        authStatus: runtime.authStatus,
+        supportsSessions: runtime.supportsSessions,
+        supportsMcp: runtime.supportsMcp,
+      },
+    });
+    currentAgents.push(agent);
+    registered.push(agent);
+  }
+
+  return registered;
 }
 
 export * from "./discovery.js";
