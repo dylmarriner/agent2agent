@@ -84,11 +84,16 @@ export interface CollectiveToolGateway {
 export interface CreateCollectiveToolGatewayOptions {
   registry: CollectiveGatewayRegistry;
   id?: (prefix: string) => string;
+  delegationDepth?: number;
+  maxDelegationDepth?: number;
 }
 
 export function createCollectiveToolGateway(options: CreateCollectiveToolGatewayOptions): CollectiveToolGateway {
   let localCounter = 0;
   const id = options.id ?? ((prefix: string) => `${prefix}-${++localCounter}`);
+  const delegationDepth = options.delegationDepth ?? 0;
+  const maxDelegationDepth = options.maxDelegationDepth ?? 3;
+  assertDelegationLimit(delegationDepth, maxDelegationDepth);
 
   const listAgents = (input: { capability?: string } = {}): CollectiveAgentSummary[] =>
     options.registry.list(input.capability).map(toAgentSummary);
@@ -106,6 +111,10 @@ export function createCollectiveToolGateway(options: CreateCollectiveToolGateway
 
   const askAgent = async (input: AskAgentInput): Promise<AskAgentResult> => {
     if (!input.prompt.trim()) throw new Error("Agent prompt must not be empty");
+    if (delegationDepth >= maxDelegationDepth) {
+      throw new Error(`Agent2Agent delegation depth limit reached: ${maxDelegationDepth}`);
+    }
+    const nextDelegationDepth = delegationDepth + 1;
     const agent = options.registry.get(input.agentId);
     const adapter = options.registry.adapterFor(input.agentId);
     const conversationId = input.conversationId ?? id("conversation");
@@ -123,6 +132,7 @@ export function createCollectiveToolGateway(options: CreateCollectiveToolGateway
           conversationId,
           ...(input.taskId ? { taskId: input.taskId } : {}),
           ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+          metadata: { agent2agentDelegationDepth: nextDelegationDepth },
         },
       );
       return { agentId: agent.id, conversationId, ...response };
@@ -132,6 +142,15 @@ export function createCollectiveToolGateway(options: CreateCollectiveToolGateway
   };
 
   return { listAgents, findAgent, askAgent };
+}
+
+function assertDelegationLimit(delegationDepth: number, maxDelegationDepth: number): void {
+  if (!Number.isInteger(delegationDepth) || delegationDepth < 0) {
+    throw new Error("Agent2Agent delegation depth must be a non-negative integer");
+  }
+  if (!Number.isInteger(maxDelegationDepth) || maxDelegationDepth < 0) {
+    throw new Error("Agent2Agent max delegation depth must be a non-negative integer");
+  }
 }
 
 const PUBLIC_AGENT_METADATA_KEYS = [
