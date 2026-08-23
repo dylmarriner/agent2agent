@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "node scripts/lint.mjs",
-    "test": "npm run build && node dist/tests/core.test.js && node dist/tests/discovery.test.js && node dist/tests/mcp-gateway.test.js",
+    "test": "npm run build && node dist/tests/core.test.js && node dist/tests/discovery.test.js && node dist/tests/mcp-gateway.test.js && node dist/tests/mcp-registration.test.js",
     "demo": "npm run build && node dist/examples/collective-demo/src/index.js",
     "mcp:stdio": "npm run build --silent && node dist/packages/mcp/src/stdio.js",
     "validate": "npm run typecheck && npm run lint && npm run test && npm run demo"
