@@ -17,6 +17,7 @@ type BuildCommands = (repoRoot: string) => Record<string, string[]>;
 type CommandResult = { exitCode: number; stdout: string; stderr: string };
 type CommandExecutor = (command: string, args: string[]) => Promise<CommandResult>;
 type InstallHosts = (options: { repoRoot: string; hosts: Array<"claude" | "codex">; execute: CommandExecutor }) => Promise<Record<string, CommandResult>>;
+type ParseHosts = (args: string[]) => Array<"claude" | "codex">;
 
 await test("builds safe stdio registration commands for Claude Code and Codex", () => {
   const build = (mcp as unknown as Record<string, unknown>).buildMcpRegistrationCommands;
@@ -70,6 +71,18 @@ await test("host installation stops and surfaces a failed registration", async (
   }
   equal(calls, ["claude"]);
   equal(message, "Failed to register Agent2Agent MCP with claude: already exists");
+});
+
+await test("installer target parser accepts claude, codex, or both and defaults to both", () => {
+  const parse = (mcp as unknown as Record<string, unknown>).parseMcpInstallHosts;
+  ok(typeof parse === "function", "parseMcpInstallHosts must be exported");
+  equal((parse as ParseHosts)([]), ["claude", "codex"]);
+  equal((parse as ParseHosts)(["both"]), ["claude", "codex"]);
+  equal((parse as ParseHosts)(["claude"]), ["claude"]);
+  equal((parse as ParseHosts)(["codex"]), ["codex"]);
+  let message = "";
+  try { (parse as ParseHosts)(["hermes"]); } catch (error) { message = error instanceof Error ? error.message : String(error); }
+  equal(message, "MCP install target must be one of: claude, codex, both");
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
