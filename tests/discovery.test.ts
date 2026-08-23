@@ -36,11 +36,11 @@ await test("discovers already-configured local CLI agents", async () => {
     },
   };
   const discovered = await (discover as DiscoverFn)({ host });
-  equal(discovered.map((a) => [a.type, a.version, a.authStatus, a.status]), [
-    ["claude-code", "2.1.0", "authenticated", "ready"],
-    ["codex", "0.149.0", "authenticated", "ready"],
-    ["hermes", "0.13.2", "authenticated", "ready"],
-    ["opencode", "1.0.180", "authenticated", "ready"],
+  equal(discovered.map((a) => [a.type, a.executablePath, a.version, a.authStatus, a.status, a.supportsSessions, a.supportsMcp]), [
+    ["claude-code", "/usr/bin/claude", "2.1.0", "authenticated", "ready", true, true],
+    ["codex", "/usr/bin/codex", "0.149.0", "authenticated", "ready", true, true],
+    ["hermes", "/usr/bin/hermes", "0.13.2", "authenticated", "ready", true, true],
+    ["opencode", "/usr/bin/opencode", "1.0.180", "authenticated", "ready", true, true],
   ]);
 });
 
