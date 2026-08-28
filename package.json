@@ -24,6 +24,7 @@
     "@agentclientprotocol/sdk": "1.4.0",
     "@modelcontextprotocol/server": "2.0.0",
     "fastify": "5.12.1",
+    "pg": "8.23.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "zod": "4.4.3"
@@ -31,6 +32,7 @@
   "devDependencies": {
     "@modelcontextprotocol/client": "2.0.0",
     "@types/node": "^24.0.0",
+    "@types/pg": "8.23.1",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.5",
     "@vitejs/plugin-react": "6.1.0",
