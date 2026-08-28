@@ -35,11 +35,14 @@ export interface AgentConversationMessageInput {
   parentMessageId?: string;
 }
 
+export type UnsequencedAgentMessage = Omit<AgentMessage, "sequence">;
+
 export interface ConversationRepository {
   saveConversation(record: ConversationRecord): Promise<void>;
   getConversation(id: string): Promise<ConversationRecord | undefined>;
   listConversations(): Promise<ConversationRecord[]>;
-  appendMessage(message: AgentMessage): Promise<void>;
+  appendMessage(message: UnsequencedAgentMessage): Promise<AgentMessage>;
+  getMessage(conversationId: string, messageId: string): Promise<AgentMessage | undefined>;
   listMessages(conversationId: string): Promise<AgentMessage[]>;
 }
 
@@ -62,10 +65,17 @@ export class InMemoryConversationRepository implements ConversationRepository {
       .map((record) => structuredClone(record));
   }
 
-  async appendMessage(message: AgentMessage): Promise<void> {
+  async appendMessage(message: UnsequencedAgentMessage): Promise<AgentMessage> {
     const messages = this.messagesByConversation.get(message.conversationId) ?? [];
-    messages.push(structuredClone(message));
+    const persisted: AgentMessage = { ...structuredClone(message), sequence: messages.length + 1 };
+    messages.push(persisted);
     this.messagesByConversation.set(message.conversationId, messages);
+    return structuredClone(persisted);
+  }
+
+  async getMessage(conversationId: string, messageId: string): Promise<AgentMessage | undefined> {
+    const message = (this.messagesByConversation.get(conversationId) ?? []).find((entry) => entry.id === messageId);
+    return message ? structuredClone(message) : undefined;
   }
 
   async listMessages(conversationId: string): Promise<AgentMessage[]> {
@@ -178,9 +188,15 @@ export class ConversationRuntime {
     taskId?: string;
     parentMessageId?: string;
   }): Promise<AgentMessage> {
-    const existing = await this.options.repository.listMessages(input.conversation.id);
+    const parent = input.parentMessageId
+      ? await this.options.repository.getMessage(input.conversation.id, input.parentMessageId)
+      : undefined;
+    if (input.parentMessageId && !parent) {
+      throw new CollectiveError("parent_message_not_found", `Unknown parent message ${input.parentMessageId}`);
+    }
+
     const content: MessagePart[] = [{ type: "text", text: input.text }];
-    const message: AgentMessage = {
+    const pending: UnsequencedAgentMessage = {
       id: this.options.id("message"),
       conversationId: input.conversation.id,
       senderAgentId: input.senderAgentId,
@@ -188,26 +204,27 @@ export class ConversationRuntime {
       intent: input.intent,
       ...(input.taskId ? { taskId: input.taskId } : {}),
       ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
-      correlationId: this.options.id("correlation"),
-      round: 0,
-      sequence: existing.length + 1,
+      correlationId: parent?.correlationId ?? this.options.id("correlation"),
+      round: parent ? parent.round + 1 : 0,
       content,
       artifacts: [],
       routingMetadata: {
         originNodeId: this.options.nodeId,
         currentNodeId: this.options.nodeId,
-        hopCount: 0,
-        visitedNodeIds: [this.options.nodeId],
+        hopCount: parent ? parent.routingMetadata.hopCount + 1 : 0,
+        visitedNodeIds: parent ? unique([...parent.routingMetadata.visitedNodeIds, this.options.nodeId]) : [this.options.nodeId],
       },
       createdAt: new Date().toISOString(),
     };
 
-    await this.options.repository.appendMessage(message);
+    const message = await this.options.repository.appendMessage(pending);
     this.options.events.publish("message.created", {
       messageId: message.id,
       senderAgentId: message.senderAgentId,
       recipientAgentIds: [...message.recipientAgentIds],
       sequence: message.sequence,
+      correlationId: message.correlationId,
+      round: message.round,
     }, {
       conversationId: message.conversationId,
       ...(message.taskId ? { taskId: message.taskId } : {}),
@@ -234,8 +251,7 @@ function parseHumanRecipients(text: string, participantIds: string[], humanParti
   const routable = participantIds.filter((participantId) => participantId !== humanParticipantId);
   const mentions = [...text.matchAll(/@([A-Za-z0-9:_-]+)/g)].map((match) => match[1]!).filter(Boolean);
   if (mentions.length === 0 || mentions.includes("collective")) return routable;
-  const recipients = unique(mentions.filter((mention) => routable.includes(mention)));
-  return recipients;
+  return unique(mentions.filter((mention) => routable.includes(mention)));
 }
 
 function unique(values: string[]): string[] {
