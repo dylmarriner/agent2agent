@@ -77,5 +77,51 @@ await test("records ordered agent replies with identity", async () => {
   equal((await runtime.messages(conversation.id)).map((entry) => entry.sequence), [1, 2, 3]);
 });
 
+await test("allocates unique monotonically ordered sequences for concurrent replies", async () => {
+  const conversation = (await runtime.list())[0]!;
+  const [claude, codex] = await Promise.all([
+    runtime.sendAgentMessage(conversation.id, {
+      senderAgentId: "claude-local",
+      recipientAgentIds: ["human:operator"],
+      text: "Claude concurrent reply",
+      intent: "ask",
+    }),
+    runtime.sendAgentMessage(conversation.id, {
+      senderAgentId: "codex-local",
+      recipientAgentIds: ["human:operator"],
+      text: "Codex concurrent reply",
+      intent: "ask",
+    }),
+  ]);
+
+  ok(claude.sequence !== codex.sequence, "concurrent messages must never share a sequence");
+  const sequences = (await runtime.messages(conversation.id)).map((entry) => entry.sequence);
+  equal(sequences, Array.from({ length: sequences.length }, (_, index) => index + 1));
+});
+
+await test("reply messages inherit correlation and advance round from their parent", async () => {
+  const conversation = (await runtime.list())[0]!;
+  const parent = await runtime.sendHumanMessage(conversation.id, { text: "@claude-local investigate this" });
+  const child = await runtime.sendAgentMessage(conversation.id, {
+    senderAgentId: "claude-local",
+    recipientAgentIds: ["codex-local"],
+    text: "@codex-local verify my finding",
+    intent: "verify",
+    parentMessageId: parent.id,
+  });
+  const grandchild = await runtime.sendAgentMessage(conversation.id, {
+    senderAgentId: "codex-local",
+    recipientAgentIds: ["claude-local"],
+    text: "Confirmed",
+    intent: "verify",
+    parentMessageId: child.id,
+  });
+
+  equal(child.correlationId, parent.correlationId);
+  equal(child.round, parent.round + 1);
+  equal(grandchild.correlationId, parent.correlationId);
+  equal(grandchild.round, child.round + 1);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) throw new Error(`${failed} conversation tests failed`);
