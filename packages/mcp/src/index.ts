@@ -73,15 +73,16 @@ export function registerCollectiveMcpTools(server: McpServer, gateway: Collectiv
       title: "Ask Agent2Agent agent",
       description: "Send a prompt to one selected Agent2Agent agent through its registered adapter and return the response.",
       inputSchema: askAgentInput,
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
-    async ({ agentId, prompt, conversationId, taskId, workspaceId }) => {
+    async ({ agentId, prompt, conversationId, taskId, workspaceId }, context) => {
       const output = await gateway.askAgent({
         agentId,
         prompt,
         ...(conversationId ? { conversationId } : {}),
         ...(taskId ? { taskId } : {}),
         ...(workspaceId ? { workspaceId } : {}),
+        signal: context.mcpReq.signal,
       });
       return {
         content: [{ type: "text", text: JSON.stringify(output) }],
