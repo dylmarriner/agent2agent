@@ -94,7 +94,7 @@ export class AcpAgentAdapter implements AgentAdapter {
   }
 
   async createSession(agent: RegisteredAgent, options: AgentSessionOptions): Promise<AgentSession> {
-    if (this.endpoint.trustStatus !== "trusted") throw new Error(`ACP endpoint ${this.endpoint.id} is not trusted`);
+    this.assertTrusted();
     const eventBuffer: AgentEvent[] = [];
     const connection = await this.connector(this.endpoint, {
       onUpdate(event) { eventBuffer.push(event); },
@@ -113,6 +113,7 @@ export class AcpAgentAdapter implements AgentAdapter {
   }
 
   async send(session: AgentSession, request: AgentRequest, context: AgentContext): Promise<AgentResponse> {
+    this.assertTrusted();
     const active = this.sessions.get(session.id);
     if (!active) throw new Error(`Unknown ACP session ${session.id}`);
     const vendorSessionId = session.vendorSessionId;
@@ -129,6 +130,7 @@ export class AcpAgentAdapter implements AgentAdapter {
   }
 
   async *stream(session: AgentSession, request: AgentRequest, context: AgentContext): AsyncIterable<AgentEvent> {
+    this.assertTrusted();
     const active = this.sessions.get(session.id);
     if (!active) throw new Error(`Unknown ACP session ${session.id}`);
     active.eventBuffer.splice(0, active.eventBuffer.length);
@@ -141,6 +143,10 @@ export class AcpAgentAdapter implements AgentAdapter {
     if (!active) return;
     this.sessions.delete(sessionId);
     await active.connection.close();
+  }
+
+  private assertTrusted(): void {
+    if (this.endpoint.trustStatus !== "trusted") throw new Error(`ACP endpoint ${this.endpoint.id} is not trusted`);
   }
 }
 
