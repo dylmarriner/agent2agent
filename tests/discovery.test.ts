@@ -74,7 +74,7 @@ await test("discovers configured local CLI and ACP-capable agents", async () => 
   ]), [
     ["claude-code", "2.1.0", "authenticated", "ready", ["cli", "mcp"], "trusted", false, true],
     ["codex", "0.149.0", "authenticated", "ready", ["cli", "mcp"], "trusted", false, true],
-    ["hermes", "0.13.2", "authenticated", "ready", ["cli", "mcp"], "trusted", false, true],
+    ["hermes", "0.13.2", "authenticated", "ready", ["cli", "mcp", "acp"], "trusted", true, true],
     ["opencode", "1.0.180", "authenticated", "ready", ["cli", "mcp"], "trusted", false, true],
     ["openclaw", "2026.8.0", "authenticated", "ready", ["cli"], "trusted", false, false],
     ["antigravity", "1.1.13", "unknown", "installed", ["cli"], "trusted", false, false],
