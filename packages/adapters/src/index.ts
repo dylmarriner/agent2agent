@@ -18,7 +18,7 @@ export interface CommandSpec {
   authStatusArgs?: string[];
   output: "text" | "json" | "jsonl";
   responseParser?: "claude-json" | "codex-jsonl" | "openclaw-json" | "text";
-  preferredIntegration: "sdk" | "gateway" | "http" | "cli" | "mcp";
+  preferredIntegration: "sdk" | "gateway" | "http" | "cli" | "mcp" | "acp";
   authentication?: "local-session" | "external";
 }
 
@@ -41,7 +41,7 @@ export const productAdapters: Record<string, ProductAdapterDescriptor> = {
       preferredIntegration: "mcp",
       authentication: "external",
     },
-    notes: "Expose Agent2Agent as MCP to Hermes where possible; direct CLI is the fallback. Hermes also supports isolated worktrees natively.",
+    notes: "Prefer Hermes MCP/ACP integration where available; direct CLI remains a fallback.",
   },
   openclaw: {
     type: "openclaw",
@@ -54,7 +54,7 @@ export const productAdapters: Record<string, ProductAdapterDescriptor> = {
       preferredIntegration: "gateway",
       authentication: "external",
     },
-    notes: "Prefer the documented OpenClaw Gateway for durable sessions; `openclaw agent exec --json` is the concrete local headless fallback and uses the user's existing OpenClaw configuration.",
+    notes: "Prefer the documented OpenClaw Gateway for durable sessions; CLI is the local headless fallback.",
   },
   opencode: {
     type: "opencode",
@@ -81,7 +81,7 @@ export const productAdapters: Record<string, ProductAdapterDescriptor> = {
       preferredIntegration: "cli",
       authentication: "local-session",
     },
-    notes: "Use the locally installed Claude Code CLI in print mode so Agent2Agent inherits the user's existing Claude subscription login. Agent2Agent does not read or store Claude credentials or require ANTHROPIC_API_KEY.",
+    notes: "Use the locally installed Claude Code CLI and its existing authenticated session; Agent2Agent does not collect Anthropic API keys.",
   },
   codex: {
     type: "codex",
@@ -95,7 +95,7 @@ export const productAdapters: Record<string, ProductAdapterDescriptor> = {
       preferredIntegration: "cli",
       authentication: "local-session",
     },
-    notes: "Use the locally installed Codex CLI with its ChatGPT-managed login. Agent2Agent never needs OPENAI_API_KEY and does not read ~/.codex/auth.json.",
+    notes: "Use the locally installed Codex CLI and ChatGPT-managed login; Agent2Agent does not collect OPENAI_API_KEY.",
   },
 };
 
@@ -106,23 +106,10 @@ export interface LocalProcessInput {
   cwd?: string;
   signal?: AbortSignal;
 }
-
-export interface LocalProcessResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
-
+export interface LocalProcessResult { exitCode: number; stdout: string; stderr: string; }
 export type LocalProcessExecutor = (input: LocalProcessInput) => Promise<LocalProcessResult>;
 
-const LOCAL_AUTH_ENV_KEYS = [
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "OPENAI_API_KEY",
-  "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_VERTEX",
-  "CLAUDE_CODE_USE_FOUNDRY",
-] as const;
+const LOCAL_AUTH_ENV_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"] as const;
 
 export function localSessionEnvironment(base: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
   const env = { ...base };
@@ -132,47 +119,34 @@ export function localSessionEnvironment(base: Record<string, string | undefined>
 
 export const defaultLocalProcessExecutor: LocalProcessExecutor = async (input) => new Promise((resolve, reject) => {
   const child = spawn(input.executable, input.args, {
-    ...(input.cwd ? { cwd: input.cwd } : {}),
-    env: input.env,
-    shell: false,
-    windowsHide: true,
-    ...(input.signal ? { signal: input.signal } : {}),
-    stdio: ["ignore", "pipe", "pipe"],
+    ...(input.cwd ? { cwd: input.cwd } : {}), env: input.env, shell: false, windowsHide: true,
+    ...(input.signal ? { signal: input.signal } : {}), stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
   let stderr = "";
+  let settled = false;
   const maxBytes = 10 * 1024 * 1024;
+  const finish = (result: LocalProcessResult): void => { if (settled) return; settled = true; resolve(result); };
+  const fail = (error: unknown): void => { if (settled) return; settled = true; reject(error); };
   const append = (current: string, chunk: Buffer): string => {
     const next = current + chunk.toString("utf8");
-    if (Buffer.byteLength(next, "utf8") > maxBytes) {
-      child.kill("SIGKILL");
-      throw new Error(`Local agent output exceeded ${maxBytes} bytes`);
-    }
+    if (Buffer.byteLength(next, "utf8") > maxBytes) { child.kill("SIGKILL"); throw new Error(`Local agent output exceeded ${maxBytes} bytes`); }
     return next;
   };
-  child.stdout?.on("data", (chunk: Buffer) => {
-    try { stdout = append(stdout, chunk); } catch (error) { reject(error); }
-  });
-  child.stderr?.on("data", (chunk: Buffer) => {
-    try { stderr = append(stderr, chunk); } catch (error) { reject(error); }
-  });
-  child.on("error", reject);
-  child.on("close", (code) => resolve({ exitCode: code ?? 1, stdout, stderr }));
+  child.stdout?.on("data", (chunk: Buffer) => { try { stdout = append(stdout, chunk); } catch (error) { fail(error); } });
+  child.stderr?.on("data", (chunk: Buffer) => { try { stderr = append(stderr, chunk); } catch (error) { fail(error); } });
+  child.on("error", fail);
+  child.on("close", (code) => finish({ exitCode: code ?? 1, stdout, stderr }));
 });
 
-interface LocalSessionState {
-  options: AgentSessionOptions;
-}
+interface LocalSessionState { options: AgentSessionOptions; }
 
 export class LocalAuthenticatedCliAdapter implements AgentAdapter {
   readonly type: string;
   private sessionCounter = 0;
   private readonly sessions = new Map<string, LocalSessionState>();
 
-  constructor(
-    private readonly descriptor: ProductAdapterDescriptor,
-    private readonly execute: LocalProcessExecutor = defaultLocalProcessExecutor,
-  ) {
+  constructor(private readonly descriptor: ProductAdapterDescriptor, private readonly execute: LocalProcessExecutor = defaultLocalProcessExecutor) {
     if (!descriptor.command) throw new Error(`Adapter ${descriptor.type} has no local CLI command`);
     this.type = descriptor.type;
   }
@@ -181,10 +155,7 @@ export class LocalAuthenticatedCliAdapter implements AgentAdapter {
     const command = this.command();
     return {
       capabilities: ["ask", "delegate", "research", "review", "critique", "verify", "test", "debug", "improve", "compare", "challenge", "summarize", "synthesize"],
-      supportsStreaming: command.output === "jsonl",
-      supportsSessions: Boolean(command.resumeArgs),
-      supportsCancellation: true,
-      supportsTools: true,
+      supportsStreaming: command.output === "jsonl", supportsSessions: Boolean(command.resumeArgs), supportsCancellation: true, supportsTools: true,
     };
   }
 
@@ -193,11 +164,7 @@ export class LocalAuthenticatedCliAdapter implements AgentAdapter {
     const args = command.authStatusArgs ?? ["--version"];
     try {
       const result = await this.execute({ executable: command.executable, args, env: localSessionEnvironment() });
-      return {
-        ok: result.exitCode === 0,
-        message: result.exitCode === 0 ? "local CLI available and authenticated" : (result.stderr.trim() || result.stdout.trim() || "local CLI authentication unavailable"),
-        checkedAt: new Date().toISOString(),
-      };
+      return { ok: result.exitCode === 0, message: result.exitCode === 0 ? "local CLI available" : (result.stderr.trim() || result.stdout.trim() || "local CLI unavailable"), checkedAt: new Date().toISOString() };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error), checkedAt: new Date().toISOString() };
     }
@@ -212,60 +179,28 @@ export class LocalAuthenticatedCliAdapter implements AgentAdapter {
   async send(session: AgentSession, request: AgentRequest, context: AgentContext): Promise<AgentResponse> {
     const command = this.command();
     const prompt = requestToPrompt(request);
-    const args = session.vendorSessionId && command.resumeArgs
-      ? command.resumeArgs(session.vendorSessionId, prompt)
-      : command.args.map((arg) => arg === "{prompt}" ? prompt : arg);
+    const args = session.vendorSessionId && command.resumeArgs ? command.resumeArgs(session.vendorSessionId, prompt) : command.args.map((arg) => arg === "{prompt}" ? prompt : arg);
     const state = this.sessions.get(session.id);
     const cwd = stringMetadata(context.metadata?.cwd) ?? stringMetadata(state?.options.metadata?.cwd);
     const env = command.authentication === "local-session" ? localSessionEnvironment() : { ...process.env };
     const delegationDepth = nonNegativeIntegerMetadata(context.metadata?.agent2agentDelegationDepth);
     if (delegationDepth !== undefined) env.AGENT2AGENT_DELEGATION_DEPTH = String(delegationDepth);
-    const result = await this.execute({
-      executable: command.executable,
-      args,
-      env,
-      ...(cwd ? { cwd } : {}),
-      ...(context.signal ? { signal: context.signal } : {}),
-    });
-    if (result.exitCode !== 0) {
-      const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`;
-      throw new Error(`${this.type} local CLI failed: ${detail}`);
-    }
+    const result = await this.execute({ executable: command.executable, args, env, ...(cwd ? { cwd } : {}), ...(context.signal ? { signal: context.signal } : {}) });
+    if (result.exitCode !== 0) throw new Error(`${this.type} local CLI failed: ${result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`}`);
     const parsed = parseLocalResponse(command, result.stdout);
     if (parsed.sessionId) session.vendorSessionId = parsed.sessionId;
-    return {
-      content: [{ type: "text", text: parsed.text }],
-      artifacts: [],
-      ...(parsed.vendorMessageId ? { vendorMessageId: parsed.vendorMessageId } : {}),
-    };
+    return { content: [{ type: "text", text: parsed.text }], artifacts: [], ...(parsed.vendorMessageId ? { vendorMessageId: parsed.vendorMessageId } : {}) };
   }
 
-  async terminateSession(sessionId: string): Promise<void> {
-    this.sessions.delete(sessionId);
-  }
-
-  private command(): CommandSpec {
-    const command = this.descriptor.command;
-    if (!command) throw new Error(`Adapter ${this.descriptor.type} has no local CLI command`);
-    return command;
-  }
+  async terminateSession(sessionId: string): Promise<void> { this.sessions.delete(sessionId); }
+  private command(): CommandSpec { const command = this.descriptor.command; if (!command) throw new Error(`Adapter ${this.descriptor.type} has no local CLI command`); return command; }
 }
 
 function requestToPrompt(request: AgentRequest): string {
-  return request.content.map((part) => {
-    if (part.type === "text") return part.text;
-    if (part.type === "json") return JSON.stringify(part.value);
-    return part.uri;
-  }).join("\n\n");
+  return request.content.map((part) => part.type === "text" ? part.text : part.type === "json" ? JSON.stringify(part.value) : part.uri).join("\n\n");
 }
-
-function stringMetadata(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function nonNegativeIntegerMetadata(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
-}
+function stringMetadata(value: unknown): string | undefined { return typeof value === "string" && value.length > 0 ? value : undefined; }
+function nonNegativeIntegerMetadata(value: unknown): number | undefined { return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined; }
 
 function parseLocalResponse(command: CommandSpec, stdout: string): { text: string; sessionId?: string; vendorMessageId?: string } {
   const parser = command.responseParser ?? (command.output === "text" ? "text" : undefined);
@@ -281,8 +216,7 @@ function parseLocalResponse(command: CommandSpec, stdout: string): { text: strin
     let vendorMessageId: string | undefined;
     const texts: string[] = [];
     for (const rawLine of stdout.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (!line) continue;
+      const line = rawLine.trim(); if (!line) continue;
       const event = JSON.parse(line) as Record<string, unknown>;
       if (event.type === "thread.started" && typeof event.thread_id === "string") sessionId = event.thread_id;
       const item = event.item;
@@ -296,13 +230,7 @@ function parseLocalResponse(command: CommandSpec, stdout: string): { text: strin
   }
   if (parser === "openclaw-json") {
     const value = JSON.parse(stdout) as Record<string, unknown>;
-    const final = typeof value.final === "string"
-      ? value.final
-      : typeof value.response === "string"
-        ? value.response
-        : typeof value.message === "string"
-          ? value.message
-          : JSON.stringify(value);
+    const final = typeof value.final === "string" ? value.final : typeof value.response === "string" ? value.response : typeof value.message === "string" ? value.message : JSON.stringify(value);
     const sessionId = typeof value.sessionId === "string" ? value.sessionId : undefined;
     return { text: final, ...(sessionId ? { sessionId } : {}) };
   }
@@ -310,23 +238,13 @@ function parseLocalResponse(command: CommandSpec, stdout: string): { text: strin
 }
 
 export type DeterministicHandler = (agent: RegisteredAgent, request: AgentRequest, context: AgentContext) => Promise<AgentResponse> | AgentResponse;
-
 export class DeterministicAdapter implements AgentAdapter {
   readonly type = "deterministic";
   private sessionCounter = 0;
-
   constructor(private readonly handlers: Record<string, DeterministicHandler>) {}
-
-  async discover(): Promise<AgentCapabilities> {
-    return { capabilities: ["ask", "delegate", "review", "test", "research"], supportsStreaming: false, supportsSessions: true, supportsCancellation: false, supportsTools: false };
-  }
-
+  async discover(): Promise<AgentCapabilities> { return { capabilities: ["ask", "delegate", "review", "test", "research"], supportsStreaming: false, supportsSessions: true, supportsCancellation: false, supportsTools: false }; }
   async healthCheck(): Promise<AgentHealth> { return { ok: true, checkedAt: new Date().toISOString() }; }
-
-  async createSession(agent: RegisteredAgent, _options: AgentSessionOptions): Promise<AgentSession> {
-    return { id: `session-${++this.sessionCounter}`, agentId: agent.id, createdAt: new Date().toISOString() };
-  }
-
+  async createSession(agent: RegisteredAgent, _options: AgentSessionOptions): Promise<AgentSession> { return { id: `session-${++this.sessionCounter}`, agentId: agent.id, createdAt: new Date().toISOString() }; }
   async send(session: AgentSession, request: AgentRequest, context: AgentContext): Promise<AgentResponse> {
     const handler = this.handlers[session.agentId];
     if (!handler) return { content: [{ type: "text", text: `${session.agentId} received ${request.intent}` }], artifacts: [] };
@@ -334,37 +252,13 @@ export class DeterministicAdapter implements AgentAdapter {
   }
 }
 
-export interface LocalAgentRegistry {
-  registerAdapter(adapter: AgentAdapter): void;
-  register(agent: RegisteredAgent): RegisteredAgent;
-  list(): RegisteredAgent[];
-}
+export interface LocalAgentRegistry { registerAdapter(adapter: AgentAdapter): void; register(agent: RegisteredAgent): RegisteredAgent; list(): RegisteredAgent[]; }
+export interface DiscoverAndRegisterLocalCliAgentsOptions { registry: LocalAgentRegistry; nodeId: string; host?: import("./discovery.js").LocalCliDiscoveryHost; }
 
-export interface DiscoverAndRegisterLocalCliAgentsOptions {
-  registry: LocalAgentRegistry;
-  nodeId: string;
-  host?: import("./discovery.js").LocalCliDiscoveryHost;
-}
+const LOCAL_AGENT_IDS: Record<string, string> = { "claude-code": "claude-local", codex: "codex-local", hermes: "hermes-local", opencode: "opencode-local", openclaw: "openclaw-local" };
+const LOCAL_AGENT_NAMES: Record<string, string> = { "claude-code": "Claude Code Local", codex: "Codex Local", hermes: "Hermes Local", opencode: "OpenCode Local", openclaw: "OpenClaw Local" };
 
-const LOCAL_AGENT_IDS: Record<string, string> = {
-  "claude-code": "claude-local",
-  codex: "codex-local",
-  hermes: "hermes-local",
-  opencode: "opencode-local",
-  openclaw: "openclaw-local",
-};
-
-const LOCAL_AGENT_NAMES: Record<string, string> = {
-  "claude-code": "Claude Code Local",
-  codex: "Codex Local",
-  hermes: "Hermes Local",
-  opencode: "OpenCode Local",
-  openclaw: "OpenClaw Local",
-};
-
-export async function discoverAndRegisterLocalCliAgents(
-  options: DiscoverAndRegisterLocalCliAgentsOptions,
-): Promise<RegisteredAgent[]> {
+export async function discoverAndRegisterLocalCliAgents(options: DiscoverAndRegisterLocalCliAgentsOptions): Promise<RegisteredAgent[]> {
   const { discoverLocalCliAgents } = await import("./discovery.js");
   const discovered = await discoverLocalCliAgents({ ...(options.host ? { host: options.host } : {}) });
   const currentAgents = options.registry.list();
@@ -375,22 +269,11 @@ export async function discoverAndRegisterLocalCliAgents(
     const descriptor = productAdapters[runtime.type];
     const id = LOCAL_AGENT_IDS[runtime.type];
     if (!descriptor?.command || !id) continue;
-
     const existing = currentAgents.find((agent) => agent.id === id);
-    if (existing) {
-      registered.push(existing);
-      continue;
-    }
-
-    const resolvedDescriptor: ProductAdapterDescriptor = {
-      ...descriptor,
-      command: { ...descriptor.command, executable: runtime.executablePath },
-    };
+    if (existing) { registered.push(existing); continue; }
+    const resolvedDescriptor: ProductAdapterDescriptor = { ...descriptor, command: { ...descriptor.command, executable: runtime.executablePath } };
     const adapter = new LocalAuthenticatedCliAdapter(resolvedDescriptor);
-    if (!adapterTypes.has(adapter.type)) {
-      options.registry.registerAdapter(adapter);
-      adapterTypes.add(adapter.type);
-    }
+    if (!adapterTypes.has(adapter.type)) { options.registry.registerAdapter(adapter); adapterTypes.add(adapter.type); }
     const capabilities = await adapter.discover();
     const agent = options.registry.register({
       id,
@@ -406,6 +289,9 @@ export async function discoverAndRegisterLocalCliAgents(
         executablePath: runtime.executablePath,
         ...(runtime.version ? { version: runtime.version } : {}),
         authStatus: runtime.authStatus,
+        transportTypes: runtime.transportTypes,
+        trustStatus: runtime.trustStatus,
+        supportsAcp: runtime.supportsAcp,
         supportsStreaming: runtime.supportsStreaming,
         supportsSessions: runtime.supportsSessions,
         supportsCancellation: runtime.supportsCancellation,
@@ -416,7 +302,6 @@ export async function discoverAndRegisterLocalCliAgents(
     currentAgents.push(agent);
     registered.push(agent);
   }
-
   return registered;
 }
 
