@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "node scripts/lint.mjs",
-    "test": "npm run build && node dist/tests/core.test.js && node dist/tests/discovery.test.js && node dist/tests/mcp-gateway.test.js && node dist/tests/mcp-registration.test.js && node dist/tests/mcp-stdio.test.js && node dist/tests/delegation-depth.test.js && node dist/tests/conversation.test.js && node dist/tests/bootstrap.test.js",
+    "test": "npm run build && node dist/tests/core.test.js && node dist/tests/discovery.test.js && node dist/tests/mcp-gateway.test.js && node dist/tests/mcp-registration.test.js && node dist/tests/mcp-stdio.test.js && node dist/tests/delegation-depth.test.js && node dist/tests/conversation.test.js && node dist/tests/bootstrap.test.js && node dist/tests/acp.test.js",
     "demo": "npm run build && node dist/examples/collective-demo/src/index.js",
     "mcp:stdio": "npm run build --silent && node dist/packages/mcp/src/stdio.js",
     "mcp:install": "npm run build --silent && node dist/packages/mcp/src/install.js",
@@ -17,6 +17,7 @@
     "validate": "npm run typecheck && npm run lint && npm run test && npm run demo"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
     "@modelcontextprotocol/server": "2.0.0",
     "zod": "4.4.3"
   },
