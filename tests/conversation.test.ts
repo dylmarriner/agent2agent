@@ -51,7 +51,7 @@ await test("records human messages before routing and parses direct mentions", a
   equal(message.recipientAgentIds, ["codex-local"]);
   equal(message.sequence, 1);
   equal(message.intent, "ask");
-  equal(runtime.messages(conversation.id).map((entry) => entry.id), [message.id]);
+  equal((await runtime.messages(conversation.id)).map((entry) => entry.id), [message.id]);
   const createdIndex = events.list().findIndex((event) => event.type === "message.created" && event.data && typeof event.data === "object" && (event.data as { messageId?: string }).messageId === message.id);
   const routedIndex = events.list().findIndex((event) => event.type === "message.routed" && event.data && typeof event.data === "object" && (event.data as { messageId?: string }).messageId === message.id);
   ok(createdIndex >= 0 && routedIndex > createdIndex, "message.created must precede message.routed");
@@ -74,7 +74,7 @@ await test("records ordered agent replies with identity", async () => {
   });
   equal(message.sequence, 3);
   equal(message.senderAgentId, "codex-local");
-  equal(runtime.messages(conversation.id).map((entry) => entry.sequence), [1, 2, 3]);
+  equal((await runtime.messages(conversation.id)).map((entry) => entry.sequence), [1, 2, 3]);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
