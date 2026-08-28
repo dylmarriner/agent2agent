@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { CollectiveError } from "../../../packages/core/src/index.js";
-import type { CollectiveEvent, RegisteredAgent } from "../../../packages/protocol/src/index.js";
+import type { CollaborationIntent, CollectiveEvent, RegisteredAgent } from "../../../packages/protocol/src/index.js";
 import type { AcpTrustStatus } from "../../../packages/acp/src/index.js";
 import type { ControlPlaneRuntime } from "./runtime.js";
 
@@ -25,17 +25,25 @@ export interface PublicAgentDto {
   supportsTools: boolean;
 }
 
+const collaborationIntents = new Set<CollaborationIntent>([
+  "ask", "delegate", "research", "review", "critique", "verify", "test", "debug",
+  "improve", "compare", "challenge", "teach", "summarize", "vote", "synthesize",
+  "spawn-specialist", "merge-findings", "request-memory", "publish-knowledge", "request-skill",
+]);
+
 export function buildApiServer(runtime: ControlPlaneRuntime): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
 
-  app.setErrorHandler((error, _request, reply) => {
-    const statusCode = error instanceof CollectiveError
+  app.setErrorHandler((error: unknown, _request, reply) => {
+    const message = error instanceof Error ? error.message : String(error);
+    const isCollective = error instanceof CollectiveError;
+    const statusCode = isCollective
       ? error.code.endsWith("not_found") || error.code === "agent_not_found" ? 404 : 400
-      : /not backed by a discovered ACP endpoint|Unknown agent|Unknown conversation/i.test(error.message) ? 404 : 500;
+      : /not backed by a discovered ACP endpoint|Unknown agent|Unknown conversation/i.test(message) ? 404 : 500;
     void reply.code(statusCode).send({
       error: {
-        code: error instanceof CollectiveError ? error.code : statusCode === 500 ? "internal_error" : "not_found",
-        message: statusCode === 500 ? "Internal control-plane error" : error.message,
+        code: isCollective ? error.code : statusCode === 500 ? "internal_error" : "not_found",
+        message: statusCode === 500 ? "Internal control-plane error" : message,
       },
     });
   });
@@ -50,9 +58,7 @@ export function buildApiServer(runtime: ControlPlaneRuntime): FastifyInstance {
     events: runtime.events.list().length,
   }));
 
-  app.get("/api/v1/agents", async () => ({
-    agents: runtime.registry.list().map(toPublicAgent),
-  }));
+  app.get("/api/v1/agents", async () => ({ agents: runtime.registry.list().map(toPublicAgent) }));
 
   app.get("/api/v1/agents/:id", async (request) => {
     const { id } = request.params as { id: string };
@@ -70,9 +76,7 @@ export function buildApiServer(runtime: ControlPlaneRuntime): FastifyInstance {
     return { agent: toPublicAgent(agent) };
   });
 
-  app.get("/api/v1/conversations", async () => ({
-    conversations: await runtime.conversations.list(),
-  }));
+  app.get("/api/v1/conversations", async () => ({ conversations: await runtime.conversations.list() }));
 
   app.post("/api/v1/conversations", async (request, reply) => {
     const body = objectBody(request.body);
@@ -101,14 +105,23 @@ export function buildApiServer(runtime: ControlPlaneRuntime): FastifyInstance {
     const body = objectBody(request.body);
     const text = requiredString(body.text, "text");
     const taskId = optionalString(body.taskId);
-    const intent = optionalString(body.intent);
+    const intent = parseIntent(body.intent);
     const message = await runtime.conversations.sendHumanMessage(id, {
       text,
       ...(taskId ? { taskId } : {}),
-      ...(intent ? { intent: intent as never } : {}),
+      ...(intent ? { intent } : {}),
     });
-    const produced = await runtime.dispatcher.dispatch(message, { signal: request.raw.aborted ? AbortSignal.abort() : undefined });
-    return reply.code(202).send({ message, produced });
+
+    const controller = new AbortController();
+    const abort = (): void => controller.abort(new Error("HTTP request closed"));
+    if (request.raw.aborted) abort();
+    else request.raw.once("aborted", abort);
+    try {
+      const produced = await runtime.dispatcher.dispatch(message, { signal: controller.signal });
+      return reply.code(202).send({ message, produced });
+    } finally {
+      request.raw.removeListener("aborted", abort);
+    }
   });
 
   app.get("/api/v1/events", async (request) => {
@@ -134,12 +147,7 @@ export function buildApiServer(runtime: ControlPlaneRuntime): FastifyInstance {
   return app;
 }
 
-function streamEvents(
-  request: FastifyRequest,
-  reply: FastifyReply,
-  runtime: ControlPlaneRuntime,
-  replay: CollectiveEvent[],
-): void {
+function streamEvents(request: FastifyRequest, reply: FastifyReply, runtime: ControlPlaneRuntime, replay: CollectiveEvent[]): void {
   reply.hijack();
   reply.raw.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
@@ -158,7 +166,10 @@ function streamEvents(
   }, 15_000);
   heartbeat.unref();
 
+  let closed = false;
   const close = (): void => {
+    if (closed) return;
+    closed = true;
     clearInterval(heartbeat);
     unsubscribe();
     if (!reply.raw.destroyed) reply.raw.end();
@@ -264,9 +275,17 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function parseIntent(value: unknown): CollaborationIntent | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !collaborationIntents.has(value as CollaborationIntent)) {
+    throw new CollectiveError("request_field", "intent is not a supported collaboration intent");
+  }
+  return value as CollaborationIntent;
+}
+
 function stringArray(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim())) {
+  if (!Array.isArray(value) || value.length === 0 || !value.every((item) => typeof item === "string" && item.trim())) {
     throw new CollectiveError("request_field", "participantIds must be a non-empty string array");
   }
   return [...new Set(value.map((item) => item.trim()))];
