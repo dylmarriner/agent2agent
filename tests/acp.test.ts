@@ -77,7 +77,7 @@ await test("cancels ACP prompt when the caller aborts", async () => {
     async prompt(sessionId, _text, signal) {
       await new Promise<void>((resolve) => {
         release = resolve;
-        signal?.addEventListener("abort", resolve, { once: true });
+        signal?.addEventListener("abort", () => resolve(), { once: true });
       });
       return { stopReason: "cancelled", text: "" };
     },
