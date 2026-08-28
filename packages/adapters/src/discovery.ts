@@ -3,9 +3,19 @@ import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 
-export type LocalCliAgentType = "claude-code" | "codex" | "hermes" | "opencode" | "openclaw";
+export type LocalCliAgentType =
+  | "claude-code"
+  | "codex"
+  | "hermes"
+  | "opencode"
+  | "openclaw"
+  | "antigravity"
+  | "copilot"
+  | "goose";
 export type LocalCliAuthStatus = "authenticated" | "unauthenticated" | "unknown";
 export type LocalCliStatus = "ready" | "installed";
+export type LocalTransportType = "cli" | "mcp" | "acp";
+export type LocalAgentTrustStatus = "trusted" | "pending-trust" | "disabled";
 export type AuthProbeKind = "exit-zero" | "nonempty" | "opencode-list" | "openclaw-status";
 
 export interface DiscoveryProbeResult {
@@ -24,7 +34,10 @@ export interface LocalCliDiscoverySpec {
   executable: string;
   versionArgs: string[];
   authStatusArgs?: string[];
-  authProbeKind: AuthProbeKind;
+  authProbeKind?: AuthProbeKind;
+  transportTypes: LocalTransportType[];
+  trustStatus: LocalAgentTrustStatus;
+  supportsAcp: boolean;
   supportsStreaming: boolean;
   supportsSessions: boolean;
   supportsCancellation: boolean;
@@ -39,6 +52,9 @@ export interface DiscoveredLocalCliAgent {
   version?: string;
   authStatus: LocalCliAuthStatus;
   status: LocalCliStatus;
+  transportTypes: LocalTransportType[];
+  trustStatus: LocalAgentTrustStatus;
+  supportsAcp: boolean;
   supportsStreaming: boolean;
   supportsSessions: boolean;
   supportsCancellation: boolean;
@@ -48,64 +64,36 @@ export interface DiscoveredLocalCliAgent {
 
 export const localCliDiscoverySpecs: readonly LocalCliDiscoverySpec[] = [
   {
-    type: "claude-code",
-    executable: "claude",
-    versionArgs: ["--version"],
-    authStatusArgs: ["auth", "status"],
-    authProbeKind: "exit-zero",
-    supportsStreaming: false,
-    supportsSessions: true,
-    supportsCancellation: true,
-    supportsTools: true,
-    supportsMcp: true,
+    type: "claude-code", executable: "claude", versionArgs: ["--version"], authStatusArgs: ["auth", "status"], authProbeKind: "exit-zero",
+    transportTypes: ["cli", "mcp"], trustStatus: "trusted", supportsAcp: false, supportsStreaming: false, supportsSessions: true, supportsCancellation: true, supportsTools: true, supportsMcp: true,
   },
   {
-    type: "codex",
-    executable: "codex",
-    versionArgs: ["--version"],
-    authStatusArgs: ["login", "status"],
-    authProbeKind: "exit-zero",
-    supportsStreaming: true,
-    supportsSessions: true,
-    supportsCancellation: true,
-    supportsTools: true,
-    supportsMcp: true,
+    type: "codex", executable: "codex", versionArgs: ["--version"], authStatusArgs: ["login", "status"], authProbeKind: "exit-zero",
+    transportTypes: ["cli", "mcp"], trustStatus: "trusted", supportsAcp: false, supportsStreaming: true, supportsSessions: true, supportsCancellation: true, supportsTools: true, supportsMcp: true,
   },
   {
-    type: "hermes",
-    executable: "hermes",
-    versionArgs: ["--version"],
-    authStatusArgs: ["auth", "status"],
-    authProbeKind: "nonempty",
-    supportsStreaming: false,
-    supportsSessions: true,
-    supportsCancellation: true,
-    supportsTools: true,
-    supportsMcp: true,
+    type: "hermes", executable: "hermes", versionArgs: ["--version"], authStatusArgs: ["auth", "status"], authProbeKind: "nonempty",
+    transportTypes: ["cli", "mcp", "acp"], trustStatus: "trusted", supportsAcp: true, supportsStreaming: false, supportsSessions: true, supportsCancellation: true, supportsTools: true, supportsMcp: true,
   },
   {
-    type: "opencode",
-    executable: "opencode",
-    versionArgs: ["--version"],
-    authStatusArgs: ["auth", "list"],
-    authProbeKind: "opencode-list",
-    supportsStreaming: true,
-    supportsSessions: true,
-    supportsCancellation: true,
-    supportsTools: true,
-    supportsMcp: true,
+    type: "opencode", executable: "opencode", versionArgs: ["--version"], authStatusArgs: ["auth", "list"], authProbeKind: "opencode-list",
+    transportTypes: ["cli", "mcp"], trustStatus: "trusted", supportsAcp: false, supportsStreaming: true, supportsSessions: true, supportsCancellation: true, supportsTools: true, supportsMcp: true,
   },
   {
-    type: "openclaw",
-    executable: "openclaw",
-    versionArgs: ["--version"],
-    authStatusArgs: ["status", "--json"],
-    authProbeKind: "openclaw-status",
-    supportsStreaming: false,
-    supportsSessions: false,
-    supportsCancellation: true,
-    supportsTools: true,
-    supportsMcp: false,
+    type: "openclaw", executable: "openclaw", versionArgs: ["--version"], authStatusArgs: ["status", "--json"], authProbeKind: "openclaw-status",
+    transportTypes: ["cli"], trustStatus: "trusted", supportsAcp: false, supportsStreaming: false, supportsSessions: false, supportsCancellation: true, supportsTools: true, supportsMcp: false,
+  },
+  {
+    type: "antigravity", executable: "agy", versionArgs: ["--version"],
+    transportTypes: ["cli"], trustStatus: "trusted", supportsAcp: false, supportsStreaming: true, supportsSessions: true, supportsCancellation: true, supportsTools: true, supportsMcp: false,
+  },
+  {
+    type: "copilot", executable: "copilot", versionArgs: ["--version"],
+    transportTypes: ["cli", "acp"], trustStatus: "trusted", supportsAcp: true, supportsStreaming: true, supportsSessions: true, supportsCancellation: true, supportsTools: true, supportsMcp: false,
+  },
+  {
+    type: "goose", executable: "goose", versionArgs: ["--version"],
+    transportTypes: ["cli", "acp"], trustStatus: "trusted", supportsAcp: true, supportsStreaming: true, supportsSessions: true, supportsCancellation: true, supportsTools: true, supportsMcp: false,
   },
 ] as const;
 
@@ -114,19 +102,14 @@ export interface DiscoverLocalCliAgentsOptions {
   specs?: readonly LocalCliDiscoverySpec[];
 }
 
-export async function discoverLocalCliAgents(
-  options: DiscoverLocalCliAgentsOptions = {},
-): Promise<DiscoveredLocalCliAgent[]> {
+export async function discoverLocalCliAgents(options: DiscoverLocalCliAgentsOptions = {}): Promise<DiscoveredLocalCliAgent[]> {
   const host = options.host ?? defaultLocalCliDiscoveryHost;
   const specs = options.specs ?? localCliDiscoverySpecs;
   const discovered = await Promise.all(specs.map((spec) => discoverOne(host, spec)));
   return discovered.filter((entry): entry is DiscoveredLocalCliAgent => entry !== undefined);
 }
 
-async function discoverOne(
-  host: LocalCliDiscoveryHost,
-  spec: LocalCliDiscoverySpec,
-): Promise<DiscoveredLocalCliAgent | undefined> {
+async function discoverOne(host: LocalCliDiscoveryHost, spec: LocalCliDiscoverySpec): Promise<DiscoveredLocalCliAgent | undefined> {
   const executablePath = await host.locate(spec.executable);
   if (!executablePath) return undefined;
 
@@ -135,7 +118,7 @@ async function discoverOne(
     spec.authStatusArgs ? safeProbe(host, executablePath, spec.authStatusArgs) : Promise.resolve(undefined),
   ]);
   const version = versionProbe ? extractVersion(versionProbe.stdout || versionProbe.stderr) : undefined;
-  const authStatus = classifyAuthStatus(authProbe, spec.authProbeKind);
+  const authStatus = spec.authProbeKind ? classifyAuthStatus(authProbe, spec.authProbeKind) : "unknown";
 
   return {
     type: spec.type,
@@ -144,6 +127,9 @@ async function discoverOne(
     ...(version ? { version } : {}),
     authStatus,
     status: authStatus === "authenticated" ? "ready" : "installed",
+    transportTypes: [...spec.transportTypes],
+    trustStatus: spec.trustStatus,
+    supportsAcp: spec.supportsAcp,
     supportsStreaming: spec.supportsStreaming,
     supportsSessions: spec.supportsSessions,
     supportsCancellation: spec.supportsCancellation,
@@ -152,23 +138,14 @@ async function discoverOne(
   };
 }
 
-async function safeProbe(
-  host: LocalCliDiscoveryHost,
-  executable: string,
-  args: string[],
-): Promise<DiscoveryProbeResult | undefined> {
-  try {
-    return await host.run(executable, args);
-  } catch {
-    return undefined;
-  }
+async function safeProbe(host: LocalCliDiscoveryHost, executable: string, args: string[]): Promise<DiscoveryProbeResult | undefined> {
+  try { return await host.run(executable, args); } catch { return undefined; }
 }
 
 function classifyAuthStatus(result: DiscoveryProbeResult | undefined, kind: AuthProbeKind): LocalCliAuthStatus {
   if (!result) return "unknown";
   if (result.exitCode !== 0) return "unauthenticated";
   const text = `${result.stdout}\n${result.stderr}`.trim();
-
   if (kind === "exit-zero") return "authenticated";
   if (kind === "nonempty") return text.length > 0 ? "authenticated" : "unauthenticated";
   if (kind === "opencode-list") {
@@ -185,9 +162,7 @@ function classifyAuthStatus(result: DiscoveryProbeResult | undefined, kind: Auth
         if (typeof status === "string" && ["ready", "running", "connected", "healthy"].includes(status.toLowerCase())) return "authenticated";
       }
       return "unauthenticated";
-    } catch {
-      return "unknown";
-    }
+    } catch { return "unknown"; }
   }
   return "unknown";
 }
@@ -197,27 +172,16 @@ function extractVersion(output: string): string | undefined {
   return match?.[0];
 }
 
-export const defaultLocalCliDiscoveryHost: LocalCliDiscoveryHost = {
-  locate: locateExecutable,
-  run: runProbe,
-};
+export const defaultLocalCliDiscoveryHost: LocalCliDiscoveryHost = { locate: locateExecutable, run: runProbe };
 
 async function locateExecutable(executable: string): Promise<string | undefined> {
   const pathValue = process.env.PATH ?? "";
   if (!pathValue) return undefined;
-  const extensions = process.platform === "win32"
-    ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
-    : [""];
-
+  const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean) : [""];
   for (const directory of pathValue.split(delimiter).filter(Boolean)) {
     for (const extension of extensions) {
       const candidate = join(directory, `${executable}${extension}`);
-      try {
-        await access(candidate, constants.X_OK);
-        return candidate;
-      } catch {
-        // Keep scanning PATH. Discovery must tolerate partially configured hosts.
-      }
+      try { await access(candidate, constants.X_OK); return candidate; } catch { /* continue */ }
     }
   }
   return undefined;
@@ -225,56 +189,25 @@ async function locateExecutable(executable: string): Promise<string | undefined>
 
 async function runProbe(executable: string, args: string[]): Promise<DiscoveryProbeResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, {
-      shell: false,
-      windowsHide: true,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(executable, args, { shell: false, windowsHide: true, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let settled = false;
     const maxBytes = 1024 * 1024;
     let timer: NodeJS.Timeout | undefined;
-
-    const cleanup = (): void => {
-      if (timer) clearTimeout(timer);
-      timer = undefined;
-    };
-    const finish = (result: DiscoveryProbeResult): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(result);
-    };
-    const fail = (error: unknown): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    };
+    const cleanup = (): void => { if (timer) clearTimeout(timer); timer = undefined; };
+    const finish = (result: DiscoveryProbeResult): void => { if (settled) return; settled = true; cleanup(); resolve(result); };
+    const fail = (error: unknown): void => { if (settled) return; settled = true; cleanup(); reject(error); };
     const append = (current: string, chunk: Buffer): string => {
       const next = current + chunk.toString("utf8");
-      if (Buffer.byteLength(next, "utf8") > maxBytes) {
-        child.kill("SIGKILL");
-        throw new Error(`CLI discovery output exceeded ${maxBytes} bytes`);
-      }
+      if (Buffer.byteLength(next, "utf8") > maxBytes) { child.kill("SIGKILL"); throw new Error(`CLI discovery output exceeded ${maxBytes} bytes`); }
       return next;
     };
-
-    child.stdout?.on("data", (chunk: Buffer) => {
-      try { stdout = append(stdout, chunk); } catch (error) { fail(error); }
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      try { stderr = append(stderr, chunk); } catch (error) { fail(error); }
-    });
+    child.stdout?.on("data", (chunk: Buffer) => { try { stdout = append(stdout, chunk); } catch (error) { fail(error); } });
+    child.stderr?.on("data", (chunk: Buffer) => { try { stderr = append(stderr, chunk); } catch (error) { fail(error); } });
     child.on("error", fail);
     child.on("close", (code: number | null) => finish({ exitCode: code ?? 1, stdout, stderr }));
-
-    timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish({ exitCode: 124, stdout, stderr: stderr || "discovery probe timed out" });
-    }, 5_000);
+    timer = setTimeout(() => { child.kill("SIGKILL"); finish({ exitCode: 124, stdout, stderr: stderr || "discovery probe timed out" }); }, 5_000);
     timer.unref();
   });
 }
