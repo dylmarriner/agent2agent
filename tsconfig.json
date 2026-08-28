@@ -16,6 +16,6 @@
     "sourceMap": true,
     "lib": ["ES2022", "DOM"]
   },
-  "include": ["packages/**/*.ts", "examples/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["packages/**/*.ts", "apps/api/**/*.ts", "examples/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "dist", "apps/web"]
 }
