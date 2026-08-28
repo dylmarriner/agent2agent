@@ -223,7 +223,7 @@ export const connectAcpProcess: AcpConnector = async (config, handlers) => {
         mcpServers: mcpServers as acp.McpServer[],
       });
     },
-    async prompt(sessionId, text, signal) {
+    async prompt(sessionId, text, _signal) {
       const texts: string[] = [];
       const listener = (event: AgentEvent): void => {
         if (event.type === "delta" && event.data && typeof event.data === "object") {
@@ -238,7 +238,7 @@ export const connectAcpProcess: AcpConnector = async (config, handlers) => {
         const response = await requireContext().request(acp.methods.agent.session.prompt, {
           sessionId,
           prompt: [{ type: "text", text }],
-        }, signal ? { signal } : undefined);
+        });
         return { stopReason: String(response.stopReason), text: texts.join("") };
       } finally {
         const current = updateListeners.get(sessionId) ?? [];
