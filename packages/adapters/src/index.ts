@@ -217,10 +217,13 @@ export class LocalAuthenticatedCliAdapter implements AgentAdapter {
       : command.args.map((arg) => arg === "{prompt}" ? prompt : arg);
     const state = this.sessions.get(session.id);
     const cwd = stringMetadata(context.metadata?.cwd) ?? stringMetadata(state?.options.metadata?.cwd);
+    const env = command.authentication === "local-session" ? localSessionEnvironment() : { ...process.env };
+    const delegationDepth = nonNegativeIntegerMetadata(context.metadata?.agent2agentDelegationDepth);
+    if (delegationDepth !== undefined) env.AGENT2AGENT_DELEGATION_DEPTH = String(delegationDepth);
     const result = await this.execute({
       executable: command.executable,
       args,
-      env: command.authentication === "local-session" ? localSessionEnvironment() : { ...process.env },
+      env,
       ...(cwd ? { cwd } : {}),
       ...(context.signal ? { signal: context.signal } : {}),
     });
@@ -258,6 +261,10 @@ function requestToPrompt(request: AgentRequest): string {
 
 function stringMetadata(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function nonNegativeIntegerMetadata(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 function parseLocalResponse(command: CommandSpec, stdout: string): { text: string; sessionId?: string; vendorMessageId?: string } {
