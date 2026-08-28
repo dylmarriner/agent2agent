@@ -1,4 +1,4 @@
-import type { AgentAdapter, AgentResponse, RegisteredAgent } from "../../protocol/src/index.js";
+import type { AgentAdapter, AgentResponse, AgentSession, RegisteredAgent } from "../../protocol/src/index.js";
 
 export interface AgentCapabilityScore {
   agentId: string;
@@ -68,6 +68,7 @@ export interface AskAgentInput {
   conversationId?: string;
   taskId?: string;
   workspaceId?: string;
+  signal?: AbortSignal;
 }
 
 export interface AskAgentResult extends AgentResponse {
@@ -86,14 +87,27 @@ export interface CreateCollectiveToolGatewayOptions {
   id?: (prefix: string) => string;
   delegationDepth?: number;
   maxDelegationDepth?: number;
+  maxActiveSessions?: number;
+}
+
+interface CachedAgentSession {
+  adapter: AgentAdapter;
+  session: AgentSession;
+  lastUsed: number;
 }
 
 export function createCollectiveToolGateway(options: CreateCollectiveToolGatewayOptions): CollectiveToolGateway {
   let localCounter = 0;
+  let sessionUseCounter = 0;
   const id = options.id ?? ((prefix: string) => `${prefix}-${++localCounter}`);
   const delegationDepth = options.delegationDepth ?? 0;
   const maxDelegationDepth = options.maxDelegationDepth ?? 3;
+  const maxActiveSessions = options.maxActiveSessions ?? 64;
+  const sessions = new Map<string, CachedAgentSession>();
   assertDelegationLimit(delegationDepth, maxDelegationDepth);
+  if (!Number.isInteger(maxActiveSessions) || maxActiveSessions < 1) {
+    throw new Error("Agent2Agent max active sessions must be a positive integer");
+  }
 
   const listAgents = (input: { capability?: string } = {}): CollectiveAgentSummary[] =>
     options.registry.list(input.capability).map(toAgentSummary);
@@ -114,34 +128,68 @@ export function createCollectiveToolGateway(options: CreateCollectiveToolGateway
     if (delegationDepth >= maxDelegationDepth) {
       throw new Error(`Agent2Agent delegation depth limit reached: ${maxDelegationDepth}`);
     }
+    if (input.signal?.aborted) throw input.signal.reason ?? new Error("Agent2Agent request aborted");
+
     const nextDelegationDepth = delegationDepth + 1;
     const agent = options.registry.get(input.agentId);
     const adapter = options.registry.adapterFor(input.agentId);
     const conversationId = input.conversationId ?? id("conversation");
-    const session = await adapter.createSession(agent, {
-      conversationId,
-      ...(input.taskId ? { taskId: input.taskId } : {}),
-      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
-    });
+    const key = sessionKey(agent.id, conversationId, input.taskId, input.workspaceId);
+    let cached = sessions.get(key);
+
+    if (!cached) {
+      if (sessions.size >= maxActiveSessions) await evictLeastRecentlyUsedSession(sessions);
+      const session = await adapter.createSession(agent, {
+        conversationId,
+        ...(input.taskId ? { taskId: input.taskId } : {}),
+        ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      });
+      cached = { adapter, session, lastUsed: ++sessionUseCounter };
+      sessions.set(key, cached);
+    } else {
+      cached.lastUsed = ++sessionUseCounter;
+    }
 
     try {
       const response = await adapter.send(
-        session,
+        cached.session,
         { intent: "ask", content: [{ type: "text", text: input.prompt }], artifacts: [] },
         {
           conversationId,
           ...(input.taskId ? { taskId: input.taskId } : {}),
           ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+          ...(input.signal ? { signal: input.signal } : {}),
           metadata: { agent2agentDelegationDepth: nextDelegationDepth },
         },
       );
+      cached.lastUsed = ++sessionUseCounter;
       return { agentId: agent.id, conversationId, ...response };
-    } finally {
-      await adapter.terminateSession?.(session.id);
+    } catch (error) {
+      if (sessions.get(key)?.session.id === cached.session.id) sessions.delete(key);
+      await adapter.terminateSession?.(cached.session.id);
+      throw error;
     }
   };
 
   return { listAgents, findAgent, askAgent };
+}
+
+async function evictLeastRecentlyUsedSession(sessions: Map<string, CachedAgentSession>): Promise<void> {
+  let oldestKey: string | undefined;
+  let oldest: CachedAgentSession | undefined;
+  for (const [key, entry] of sessions) {
+    if (!oldest || entry.lastUsed < oldest.lastUsed) {
+      oldestKey = key;
+      oldest = entry;
+    }
+  }
+  if (!oldestKey || !oldest) return;
+  sessions.delete(oldestKey);
+  await oldest.adapter.terminateSession?.(oldest.session.id);
+}
+
+function sessionKey(agentId: string, conversationId: string, taskId?: string, workspaceId?: string): string {
+  return [agentId, conversationId, taskId ?? "", workspaceId ?? ""].join("\u0000");
 }
 
 function assertDelegationLimit(delegationDepth: number, maxDelegationDepth: number): void {
@@ -157,7 +205,6 @@ const PUBLIC_AGENT_METADATA_KEYS = [
   "source",
   "version",
   "authStatus",
-  "executablePath",
   "supportsStreaming",
   "supportsSessions",
   "supportsCancellation",
