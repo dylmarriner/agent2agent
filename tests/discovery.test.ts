@@ -27,7 +27,7 @@ function configuredHost(): DiscoveryHost {
     hermes: "/usr/bin/hermes",
     opencode: "/usr/bin/opencode",
     openclaw: "/usr/bin/openclaw",
-    gemini: "/usr/bin/gemini",
+    agy: "/usr/bin/agy",
     copilot: "/usr/bin/copilot",
     goose: "/usr/bin/goose",
   };
@@ -42,7 +42,7 @@ function configuredHost(): DiscoveryHost {
           hermes: "Hermes Agent 0.13.2",
           opencode: "1.0.180",
           openclaw: "OpenClaw 2026.8.0",
-          gemini: "0.44.0",
+          agy: "Antigravity CLI 1.1.13",
           copilot: "1.12.0",
           goose: "goose 1.21.0",
         };
@@ -58,7 +58,7 @@ function configuredHost(): DiscoveryHost {
   };
 }
 
-await test("discovers already-configured local CLI and ACP-capable agents", async () => {
+await test("discovers configured local CLI and ACP-capable agents", async () => {
   const discover = (adapters as unknown as Record<string, unknown>).discoverLocalCliAgents;
   ok(typeof discover === "function", "discoverLocalCliAgents must be exported");
   const discovered = await (discover as DiscoverFn)({ host: configuredHost() });
@@ -77,7 +77,7 @@ await test("discovers already-configured local CLI and ACP-capable agents", asyn
     ["hermes", "0.13.2", "authenticated", "ready", ["cli", "mcp"], "trusted", false, true],
     ["opencode", "1.0.180", "authenticated", "ready", ["cli", "mcp"], "trusted", false, true],
     ["openclaw", "2026.8.0", "authenticated", "ready", ["cli"], "trusted", false, false],
-    ["gemini", "0.44.0", "unknown", "installed", ["cli", "acp"], "trusted", true, false],
+    ["antigravity", "1.1.13", "unknown", "installed", ["cli"], "trusted", false, false],
     ["copilot", "1.12.0", "unknown", "installed", ["cli", "acp"], "trusted", true, false],
     ["goose", "1.21.0", "unknown", "installed", ["cli", "acp"], "trusted", true, false],
   ]);
@@ -105,7 +105,7 @@ await test("does not call empty or unhealthy CLI auth state ready", async () => 
   ]);
 });
 
-await test("registers discovered local CLIs as routable collective agents with trust evidence", async () => {
+await test("registers routable CLI agents with trust and transport evidence", async () => {
   const register = (adapters as unknown as Record<string, unknown>).discoverAndRegisterLocalCliAgents;
   ok(typeof register === "function", "discoverAndRegisterLocalCliAgents must be exported");
   const events = new EventStore("node-local", createMonotonicIdFactory("discovery"));
