@@ -15,17 +15,25 @@
     "mcp:install": "npm run build --silent && node dist/packages/mcp/src/install.js",
     "bootstrap": "npm run build --silent && node dist/packages/bootstrap/src/cli.js",
     "api:start": "npm run build --silent && node dist/apps/api/src/start.js",
-    "validate": "npm run typecheck && npm run lint && npm run test && npm run demo"
+    "web:dev": "vite --config apps/web/vite.config.ts",
+    "web:build": "vite build --config apps/web/vite.config.ts",
+    "validate": "npm run typecheck && npm run lint && npm run test && npm run web:build && npm run demo"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
     "@modelcontextprotocol/server": "2.0.0",
     "fastify": "5.12.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.0.0",
     "@types/node": "^24.0.0",
-    "typescript": "^6.0.0"
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "6.1.0",
+    "typescript": "^6.0.0",
+    "vite": "8.2.2"
   }
 }
