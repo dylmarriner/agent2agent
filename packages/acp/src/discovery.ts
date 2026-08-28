@@ -178,6 +178,31 @@ export async function registerAcpEndpoints(options: RegisterAcpEndpointsOptions)
   return registered;
 }
 
+export interface SetAcpEndpointTrustOptions {
+  registry: AcpAgentRegistry;
+  endpoints: DiscoveredAcpEndpoint[];
+  agentId: string;
+  trustStatus: AcpTrustStatus;
+}
+
+export async function setAcpEndpointTrust(options: SetAcpEndpointTrustOptions): Promise<RegisteredAgent> {
+  const endpoint = options.endpoints.find((candidate) => canonicalIdentityFor(candidate).id === options.agentId);
+  if (!endpoint) throw new Error(`Agent ${options.agentId} is not backed by a discovered ACP endpoint`);
+  endpoint.trustStatus = options.trustStatus;
+
+  const existing = options.registry.get(options.agentId);
+  const updated: RegisteredAgent = {
+    ...existing,
+    status: options.trustStatus === "trusted" ? (existing.status === "busy" ? "busy" : "idle") : "degraded",
+    metadata: {
+      ...existing.metadata,
+      trustStatus: options.trustStatus,
+    },
+  };
+  options.registry.remove(existing.id);
+  return options.registry.register(updated);
+}
+
 function bindAdapterType(inner: AcpAgentAdapter, type: string): AgentAdapter {
   return {
     type,
@@ -190,7 +215,7 @@ function bindAdapterType(inner: AcpAgentAdapter, type: string): AgentAdapter {
   };
 }
 
-function canonicalIdentityFor(endpoint: DiscoveredAcpEndpoint): { id: string; name: string } {
+export function canonicalIdentityFor(endpoint: DiscoveredAcpEndpoint): { id: string; name: string } {
   const known = KNOWN_ACP_SPECS.find((spec) => spec.id === endpoint.id);
   if (known) return { id: known.canonicalAgentId, name: known.name };
   return { id: endpoint.id, name: endpoint.id };
