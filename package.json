@@ -16,8 +16,9 @@
     "bootstrap": "npm run build --silent && node dist/packages/bootstrap/src/cli.js",
     "api:start": "npm run build --silent && node dist/apps/api/src/start.js",
     "web:dev": "vite --config apps/web/vite.config.ts",
+    "web:typecheck": "tsc -p apps/web/tsconfig.json --noEmit",
     "web:build": "vite build --config apps/web/vite.config.ts",
-    "validate": "npm run typecheck && npm run lint && npm run test && npm run web:build && npm run demo"
+    "validate": "npm run typecheck && npm run web:typecheck && npm run lint && npm run test && npm run web:build && npm run demo"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
