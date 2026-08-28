@@ -1,5 +1,5 @@
 import type { AcpConnector } from "../packages/acp/src/index.js";
-import { discoverAcpEndpoints, registerAcpEndpoints } from "../packages/acp/src/discovery.js";
+import { discoverAcpEndpoints, registerAcpEndpoints, setAcpEndpointTrust } from "../packages/acp/src/discovery.js";
 import { AgentRegistry, EventStore, createMonotonicIdFactory } from "../packages/core/src/index.js";
 import { DeterministicAdapter } from "../packages/adapters/src/index.js";
 
@@ -97,6 +97,38 @@ await test("pending-trust custom ACP endpoint is visible but not executable", as
   const custom = registry.get("custom-linter");
   equal(custom.status, "degraded");
   equal(custom.metadata.trustStatus, "pending-trust");
+});
+
+await test("trust transitions update both the canonical agent and live ACP adapter", async () => {
+  const events = new EventStore("node-local", createMonotonicIdFactory("acp-trust"));
+  const registry = new AgentRegistry(events);
+  const endpoints = await discoverAcpEndpoints({
+    host,
+    customEndpoints: [{ id: "custom-linter", type: "custom", command: "custom-acp", args: ["serve"] }],
+  });
+  let connections = 0;
+  const connector: AcpConnector = async () => {
+    connections += 1;
+    return {
+      capabilities: { loadSession: false },
+      async newSession() { return "trusted-session"; },
+      async prompt() { return { stopReason: "end_turn", text: "ok" }; },
+      async cancel() {},
+      async close() {},
+    };
+  };
+  await registerAcpEndpoints({ registry, nodeId: "node-local", endpoints, connector });
+
+  const trusted = await setAcpEndpointTrust({ registry, endpoints, agentId: "custom-linter", trustStatus: "trusted" });
+  equal(trusted.status, "idle");
+  equal(trusted.metadata.trustStatus, "trusted");
+  const session = await registry.adapterFor("custom-linter").createSession(trusted, { conversationId: "conv-trust" });
+  equal(session.vendorSessionId, "trusted-session");
+  equal(connections, 1);
+
+  const disabled = await setAcpEndpointTrust({ registry, endpoints, agentId: "custom-linter", trustStatus: "disabled" });
+  equal(disabled.status, "degraded");
+  equal(disabled.metadata.trustStatus, "disabled");
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
