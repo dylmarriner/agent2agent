@@ -1,4 +1,5 @@
-import { AcpAgentAdapter, discoverAcpEndpoints, registerAcpEndpoints, type AcpConnector } from "../packages/acp/src/index.js";
+import type { AcpConnector } from "../packages/acp/src/index.js";
+import { discoverAcpEndpoints, registerAcpEndpoints } from "../packages/acp/src/discovery.js";
 import { AgentRegistry, EventStore, createMonotonicIdFactory } from "../packages/core/src/index.js";
 import { DeterministicAdapter } from "../packages/adapters/src/index.js";
 
@@ -78,7 +79,7 @@ await test("ACP registration upgrades an existing canonical agent instead of dup
   equal(hermes.adapterType, "acp:hermes-acp");
   equal(hermes.metadata.transportTypes, ["cli", "mcp", "acp"]);
   equal(registry.list().filter((agent) => agent.id.startsWith("hermes")).map((agent) => agent.id), ["hermes-local"]);
-  ok(registry.adapterFor("hermes-local") instanceof AcpAgentAdapter);
+  equal(registry.adapterFor("hermes-local").type, "acp:hermes-acp");
   ok(registered.some((agent) => agent.id === "copilot-local" && agent.adapterType === "acp:copilot-acp"));
   ok(registered.some((agent) => agent.id === "goose-local" && agent.adapterType === "acp:goose-acp"));
   ok(registered.some((agent) => agent.id === "antigravity-local" && agent.adapterType === "acp:antigravity-acp"));
