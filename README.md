@@ -16,6 +16,7 @@ This repository is under active implementation. The first vertical slices are in
 - MCP v2 stdio server using the official `@modelcontextprotocol/server` package
 - MCP tools: `list_agents`, `find_agent` and `ask_agent`
 - non-shell MCP registration helpers for Claude Code and Codex
+- bounded nested MCP delegation depth with propagation across local CLI child processes
 - task DAG with dependency validation
 - bounded swarm runtime with depth/child/runtime/message/cost controls
 - scoped authoritative memory with optional cognitive-provider fallback
@@ -90,33 +91,41 @@ Once connected, an MCP host can use:
 
 The local MCP runtime does not read Claude Code or Codex credential files. Local CLI adapters continue to rely on the authentication/configuration owned by those CLIs.
 
+Nested Agent2Agent delegation is bounded. Local child agents receive the current depth through `AGENT2AGENT_DELEGATION_DEPTH`, and nested MCP runtimes inherit it. `AGENT2AGENT_MAX_DELEGATION_DEPTH` controls the maximum and defaults to `3`. Invalid or negative depth configuration is rejected rather than silently coerced.
+
 ## Architecture
 
 ```mermaid
 flowchart TB
-    Human[Human / Operator] --> Host[Claude Code / Codex / MCP Host]
-    Host --> MCP[Agent2Agent MCP stdio gateway]
-    MCP --> Gateway[Collective Tool Gateway]
-    Gateway --> Registry[Agent + Capability Registry]
-    Gateway --> Adapters[Normalized Adapter Runtime]
-    Adapters --> Hermes[Hermes]
-    Adapters --> OpenClaw[OpenClaw]
-    Adapters --> OpenCode[OpenCode]
-    Adapters --> Claude[Local Claude Code CLI\nexisting auth]
-    Adapters --> Codex[Local Codex CLI\nexisting auth]
-    Gateway --> Conversation[Conversation Engine]
-    Conversation --> Router[Expert / Strategy Router]
-    Conversation --> Tasks[Task DAG]
-    Tasks --> Swarm[Bounded Swarm Runtime]
-    Conversation --> Memory[Hybrid Memory]
-    Memory --> Authoritative[PostgreSQL / semantic store]
-    Memory -. optional .-> STG[SCOS / STG]
-    Conversation --> Graph[Temporal Knowledge Graph]
-    Conversation --> Intelligence[Shared Intelligence]
-    Intelligence --> Eval[Benchmark + Promotion Engine]
-    Conversation --> Workspaces[Git Workspace Manager]
-    Conversation --> Federation[Federation Guard / Mesh]
+    subgraph MCPPath[Implemented MCP direct path]
+        Human[Human / Operator] --> Host[Claude Code / Codex / MCP Host]
+        Host --> MCP[Agent2Agent MCP stdio gateway]
+        MCP --> Gateway[Collective Tool Gateway]
+        Gateway --> Registry[Agent + Capability Registry]
+        Gateway --> Adapters[Normalized Adapter Runtime]
+        Adapters --> Hermes[Hermes]
+        Adapters --> OpenClaw[OpenClaw]
+        Adapters --> OpenCode[OpenCode]
+        Adapters --> Claude[Local Claude Code CLI\nexisting auth]
+        Adapters --> Codex[Local Codex CLI\nexisting auth]
+    end
+
+    subgraph Core[Implemented orchestration primitives]
+        Conversation[Conversation Engine] --> Router[Expert / Strategy Router]
+        Conversation --> Tasks[Task DAG]
+        Tasks --> Swarm[Bounded Swarm Runtime]
+        Conversation --> Memory[Hybrid Memory]
+        Memory --> Authoritative[PostgreSQL / semantic store]
+        Memory -. optional .-> STG[SCOS / STG]
+        Conversation --> Graph[Temporal Knowledge Graph]
+        Conversation --> Intelligence[Shared Intelligence]
+        Intelligence --> Eval[Benchmark + Promotion Engine]
+        Conversation --> Workspaces[Git Workspace Manager]
+        Conversation --> Federation[Federation Guard / Mesh]
+    end
 ```
+
+The MCP `ask_agent` path currently routes directly through the collective gateway to the selected registered adapter. The orchestration primitives shown separately above are implemented core services, but are not falsely presented here as being traversed by every MCP call.
 
 PostgreSQL remains the intended authoritative application datastore. SCOS/STG is an optional cognitive memory provider because its current API is alpha and its BUSL-1.1 licensing requires separate commercial terms for for-profit deployment.
 
@@ -140,7 +149,7 @@ Do not put `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` into Agent2Agent for these ad
 
 ## Safety model
 
-The runtime treats agents, remote nodes, memory, packages and model output as untrusted. Current core controls include bounded swarms, scoped memory, duplicate-message prevention, federation loop/replay protection, explicit permissions, merge review gates, SSRF target rejection and shell-free MCP host registration. Enforcement is designed to live in runtime policy rather than prompts.
+The runtime treats agents, remote nodes, memory, packages and model output as untrusted. Current core controls include bounded swarms, bounded nested MCP delegation, scoped memory, duplicate-message prevention, federation loop/replay protection, explicit permissions, merge review gates, SSRF target rejection and shell-free MCP host registration. Enforcement is designed to live in runtime policy rather than prompts.
 
 ## Status
 
