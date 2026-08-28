@@ -181,7 +181,7 @@ export async function registerAcpEndpoints(options: RegisterAcpEndpointsOptions)
 function bindAdapterType(inner: AcpAgentAdapter, type: string): AgentAdapter {
   return {
     type,
-    discover: (config) => inner.discover(config),
+    discover: (_config) => inner.discover(),
     healthCheck: (agent) => inner.healthCheck(agent),
     createSession: (agent, sessionOptions) => inner.createSession(agent, sessionOptions),
     send: (session, request, context) => inner.send(session, request, context),
