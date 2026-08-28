@@ -111,8 +111,14 @@ export async function createLocalCollectiveMcpRuntime(nodeId = process.env.AGENT
   const id = createMonotonicIdFactory(nodeId);
   const events = new EventStore(nodeId, id);
   const registry = new AgentRegistry(events);
+  const delegationDepth = readNonNegativeIntegerEnv("AGENT2AGENT_DELEGATION_DEPTH", 0);
+  const maxDelegationDepth = readNonNegativeIntegerEnv("AGENT2AGENT_MAX_DELEGATION_DEPTH", 3);
   await discoverAndRegisterLocalCliAgents({ registry, nodeId });
-  return { nodeId, registry, gateway: createCollectiveToolGateway({ registry, id }) };
+  return {
+    nodeId,
+    registry,
+    gateway: createCollectiveToolGateway({ registry, id, delegationDepth, maxDelegationDepth }),
+  };
 }
 
 export async function startLocalCollectiveMcpStdio(): Promise<StdioServerHandle> {
@@ -188,3 +194,12 @@ export const executeCommand: CommandExecutor = async (command, args) => new Prom
   child.on("error", reject);
   child.on("close", (code) => resolveResult({ exitCode: code ?? 1, stdout, stderr }));
 });
+
+function readNonNegativeIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  if (!/^\d+$/.test(raw)) throw new Error(`${name} must be a non-negative integer`);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) throw new Error(`${name} must be a non-negative integer`);
+  return value;
+}
