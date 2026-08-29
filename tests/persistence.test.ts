@@ -1,6 +1,8 @@
 import type { AgentMessage, CollectiveEvent } from "../packages/protocol/src/index.js";
 import type { ConversationRecord, UnsequencedAgentMessage } from "../packages/conversation/src/index.js";
+import { EventStore, createMonotonicIdFactory } from "../packages/core/src/index.js";
 import {
+  EventPersistenceBridge,
   PostgresConversationRepository,
   PostgresEventJournal,
   ensureRuntimeSchema,
@@ -137,6 +139,29 @@ await test("event journal preserves event order for restart replay", async () =>
   ok(sql.calls.some((call) => call.text.includes("INSERT INTO a2a_runtime_events")));
   sql.eventRows = [{ event_order: 1, id: event.id, type: event.type, node_id: event.nodeId, conversation_id: event.conversationId, task_id: null, agent_id: null, data: event.data, created_at: event.at }];
   equal(await journal.list(), [event]);
+});
+
+await test("event store hydrates restart history and persistence bridge flushes new events", async () => {
+  const event: CollectiveEvent = {
+    id: "evt_persisted_1",
+    type: "conversation.started",
+    nodeId: "local",
+    conversationId: conversation.id,
+    at: "2026-08-28T09:59:59.000Z",
+    data: { restored: true },
+  };
+  const events = new EventStore("local", createMonotonicIdFactory("persist-bridge"));
+  events.hydrate([event]);
+  equal(events.list(), [event]);
+
+  const persisted: CollectiveEvent[] = [];
+  const bridge = new EventPersistenceBridge(events, {
+    async append(next) { persisted.push(next); },
+  });
+  const live = events.publish("message.created", { messageId: "live" }, { conversationId: conversation.id });
+  await bridge.flush();
+  equal(persisted.map((entry) => entry.id), [live.id]);
+  await bridge.close();
 });
 
 function rowForMessage(message: AgentMessage): Record<string, unknown> {
