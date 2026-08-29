@@ -1,8 +1,8 @@
 import type { AgentMessage, CollectiveEvent } from "../packages/protocol/src/index.js";
 import type { ConversationRecord, UnsequencedAgentMessage } from "../packages/conversation/src/index.js";
-import { EventStore, createMonotonicIdFactory } from "../packages/core/src/index.js";
+import { createMonotonicIdFactory } from "../packages/core/src/index.js";
+import { DurableEventStore } from "../packages/database/src/durable-events.js";
 import {
-  EventPersistenceBridge,
   PostgresConversationRepository,
   PostgresEventJournal,
   ensureRuntimeSchema,
@@ -141,8 +141,8 @@ await test("event journal preserves event order for restart replay", async () =>
   equal(await journal.list(), [event]);
 });
 
-await test("event store hydrates restart history and persistence bridge flushes new events", async () => {
-  const event: CollectiveEvent = {
+await test("durable event store hydrates restart history and flushes new events", async () => {
+  const historical: CollectiveEvent = {
     id: "evt_persisted_1",
     type: "conversation.started",
     nodeId: "local",
@@ -150,18 +150,20 @@ await test("event store hydrates restart history and persistence bridge flushes 
     at: "2026-08-28T09:59:59.000Z",
     data: { restored: true },
   };
-  const events = new EventStore("local", createMonotonicIdFactory("persist-bridge"));
-  events.hydrate([event]);
-  equal(events.list(), [event]);
-
   const persisted: CollectiveEvent[] = [];
-  const bridge = new EventPersistenceBridge(events, {
-    async append(next) { persisted.push(next); },
+  const store = await DurableEventStore.create({
+    nodeId: "local",
+    id: createMonotonicIdFactory("persist-bridge"),
+    journal: {
+      async list() { return [historical]; },
+      async append(next: CollectiveEvent) { persisted.push(next); },
+    },
   });
-  const live = events.publish("message.created", { messageId: "live" }, { conversationId: conversation.id });
-  await bridge.flush();
+  equal(store.list(), [historical]);
+  const live = store.publish("message.created", { messageId: "live" }, { conversationId: conversation.id });
+  await store.flush();
   equal(persisted.map((entry) => entry.id), [live.id]);
-  await bridge.close();
+  await store.close();
 });
 
 function rowForMessage(message: AgentMessage): Record<string, unknown> {
