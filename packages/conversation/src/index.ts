@@ -104,7 +104,9 @@ export class ConversationRuntime {
   async create(input: CreateConversationInput): Promise<ConversationRecord> {
     const now = new Date().toISOString();
     const participantIds = unique([this.humanParticipantId, ...input.participantIds]);
-    if (participantIds.length < 2) throw new CollectiveError("conversation_participants", "Conversation requires at least one non-human participant");
+    if (!participantIds.some((participantId) => !participantId.startsWith("human:"))) {
+      throw new CollectiveError("conversation_participants", "Conversation requires at least one non-human participant");
+    }
     const record: ConversationRecord = {
       id: this.options.id("conversation"),
       nodeId: this.options.nodeId,
@@ -144,7 +146,7 @@ export class ConversationRuntime {
     const conversation = await this.requireConversation(conversationId);
     const text = input.text.trim();
     if (!text) throw new CollectiveError("message_empty", "Message text is required");
-    const recipientAgentIds = parseHumanRecipients(text, conversation.participantIds, this.humanParticipantId);
+    const recipientAgentIds = parseHumanRecipients(text, conversation.participantIds);
     if (recipientAgentIds.length === 0) throw new CollectiveError("message_recipients", "No routable conversation participants matched this message");
     return this.persistAndRoute({
       conversation,
@@ -158,6 +160,9 @@ export class ConversationRuntime {
 
   async sendAgentMessage(conversationId: string, input: AgentConversationMessageInput): Promise<AgentMessage> {
     const conversation = await this.requireConversation(conversationId);
+    if (input.senderAgentId.startsWith("human:")) {
+      throw new CollectiveError("conversation_sender", "Agent messages cannot use a human participant as sender");
+    }
     if (!conversation.participantIds.includes(input.senderAgentId)) {
       throw new CollectiveError("conversation_sender", `Agent ${input.senderAgentId} is not a participant in ${conversationId}`);
     }
@@ -247,8 +252,8 @@ export class ConversationRuntime {
   }
 }
 
-function parseHumanRecipients(text: string, participantIds: string[], humanParticipantId: string): string[] {
-  const routable = participantIds.filter((participantId) => participantId !== humanParticipantId);
+function parseHumanRecipients(text: string, participantIds: string[]): string[] {
+  const routable = participantIds.filter((participantId) => !participantId.startsWith("human:"));
   const mentions = [...text.matchAll(/@([A-Za-z0-9:_-]+)/g)].map((match) => match[1]!).filter(Boolean);
   if (mentions.length === 0 || mentions.includes("collective")) return routable;
   return unique(mentions.filter((mention) => routable.includes(mention)));
