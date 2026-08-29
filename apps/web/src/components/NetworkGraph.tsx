@@ -19,7 +19,10 @@ export function NetworkGraph({ conversation, agents, messages }: NetworkGraphPro
   const graph = useMemo(() => {
     if (!conversation) return { nodes: [] as NodePoint[], edges: [] as Array<{ key: string; from: NodePoint; to: NodePoint; count: number }> };
     const agentNames = new Map(agents.map((agent) => [agent.id, agent.name]));
-    const ids = conversation.participantIds;
+    const ids = [...new Set([
+      ...conversation.participantIds,
+      ...messages.flatMap((message) => [message.senderAgentId, ...message.recipientAgentIds]),
+    ])];
     const centerX = 160;
     const centerY = 150;
     const radius = Math.min(110, 55 + ids.length * 8);
