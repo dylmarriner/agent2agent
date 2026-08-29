@@ -326,11 +326,11 @@ function mapEventRow(row: EventRow): CollectiveEvent {
     id: row.id,
     type: row.type as CollectiveEventType,
     nodeId: row.node_id,
-    at: isoDate(row.created_at),
-    data: row.data,
     ...(row.conversation_id ? { conversationId: row.conversation_id } : {}),
     ...(row.task_id ? { taskId: row.task_id } : {}),
     ...(row.agent_id ? { agentId: row.agent_id } : {}),
+    at: isoDate(row.created_at),
+    data: row.data,
   };
 }
 
