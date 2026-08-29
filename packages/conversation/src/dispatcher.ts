@@ -23,9 +23,11 @@ interface CachedDispatchSession {
 
 export class ConversationDispatcher {
   private readonly sessions = new Map<string, CachedDispatchSession>();
+  private readonly sessionCreations = new Map<string, Promise<CachedDispatchSession>>();
   private readonly maxAgentHops: number;
   private readonly maxActiveSessions: number;
   private useCounter = 0;
+  private closing = false;
 
   constructor(private readonly options: ConversationDispatcherOptions) {
     this.maxAgentHops = options.maxAgentHops ?? 6;
@@ -35,6 +37,7 @@ export class ConversationDispatcher {
   }
 
   async dispatch(message: AgentMessage, options: { signal?: AbortSignal; hop?: number } = {}): Promise<AgentMessage[]> {
+    if (this.closing) throw new Error("Conversation dispatcher is closing");
     const hop = options.hop ?? 0;
     if (hop >= this.maxAgentHops) throw new Error(`Conversation agent hop limit reached: ${this.maxAgentHops}`);
     if (options.signal?.aborted) throw options.signal.reason ?? new Error("Conversation dispatch aborted");
@@ -54,6 +57,9 @@ export class ConversationDispatcher {
   }
 
   async close(): Promise<void> {
+    if (this.closing) return;
+    this.closing = true;
+    await Promise.allSettled([...this.sessionCreations.values()]);
     const active = [...this.sessions.values()];
     this.sessions.clear();
     await Promise.allSettled(active.map((entry) => entry.adapter.terminateSession?.(entry.session.id)));
@@ -63,18 +69,7 @@ export class ConversationDispatcher {
     const agent = this.options.registry.get(recipientId);
     const adapter = this.options.registry.adapterFor(recipientId);
     const key = `${message.conversationId}\u0000${recipientId}`;
-    let cached = this.sessions.get(key);
-    if (!cached) {
-      if (this.sessions.size >= this.maxActiveSessions) await this.evictOldest();
-      const session = await adapter.createSession(agent, {
-        conversationId: message.conversationId,
-        ...(message.taskId ? { taskId: message.taskId } : {}),
-      });
-      cached = { adapter, session, lastUsed: ++this.useCounter };
-      this.sessions.set(key, cached);
-    } else {
-      cached.lastUsed = ++this.useCounter;
-    }
+    const cached = await this.acquireSession(key, agent, adapter, message);
 
     try {
       const response = await adapter.send(
@@ -122,6 +117,61 @@ export class ConversationDispatcher {
       if (this.sessions.get(key)?.session.id === cached.session.id) this.sessions.delete(key);
       await adapter.terminateSession?.(cached.session.id);
       throw error;
+    }
+  }
+
+  private async acquireSession(
+    key: string,
+    agent: RegisteredAgent,
+    adapter: AgentAdapter,
+    message: AgentMessage,
+  ): Promise<CachedDispatchSession> {
+    const cached = this.sessions.get(key);
+    if (cached) {
+      cached.lastUsed = ++this.useCounter;
+      return cached;
+    }
+    const inFlight = this.sessionCreations.get(key);
+    if (inFlight) {
+      const created = await inFlight;
+      created.lastUsed = ++this.useCounter;
+      return created;
+    }
+
+    await this.reserveSessionCapacity();
+    if (this.closing) throw new Error("Conversation dispatcher is closing");
+
+    const creation = (async (): Promise<CachedDispatchSession> => {
+      const session = await adapter.createSession(agent, {
+        conversationId: message.conversationId,
+        ...(message.taskId ? { taskId: message.taskId } : {}),
+      });
+      if (this.closing) {
+        await adapter.terminateSession?.(session.id);
+        throw new Error("Conversation dispatcher closed during session creation");
+      }
+      const created = { adapter, session, lastUsed: ++this.useCounter };
+      this.sessions.set(key, created);
+      return created;
+    })();
+    this.sessionCreations.set(key, creation);
+    try {
+      return await creation;
+    } finally {
+      if (this.sessionCreations.get(key) === creation) this.sessionCreations.delete(key);
+    }
+  }
+
+  private async reserveSessionCapacity(): Promise<void> {
+    while (this.sessions.size + this.sessionCreations.size >= this.maxActiveSessions) {
+      if (this.sessions.size > 0) {
+        await this.evictOldest();
+        continue;
+      }
+      const pending = [...this.sessionCreations.values()];
+      if (pending.length === 0) break;
+      await Promise.race(pending).catch(() => {});
+      if (this.closing) throw new Error("Conversation dispatcher is closing");
     }
   }
 
