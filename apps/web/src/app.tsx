@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createConversation,
   fetchAgents,
@@ -22,6 +22,7 @@ import { CreateConversation } from "./components/CreateConversation.js";
 import { NetworkGraph } from "./components/NetworkGraph.js";
 
 export function App() {
+  const messageRequest = useRef(0);
   const [health, setHealth] = useState<HealthDto | null>(null);
   const [agents, setAgents] = useState<AgentDto[]>([]);
   const [conversations, setConversations] = useState<ConversationDto[]>([]);
@@ -55,11 +56,13 @@ export function App() {
   };
 
   const refreshMessages = async (conversationId: string | null) => {
+    const requestId = ++messageRequest.current;
     if (!conversationId) {
-      setMessages([]);
+      if (requestId === messageRequest.current) setMessages([]);
       return;
     }
-    setMessages(await fetchMessages(conversationId));
+    const next = await fetchMessages(conversationId);
+    if (requestId === messageRequest.current) setMessages(next);
   };
 
   useEffect(() => {
