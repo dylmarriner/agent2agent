@@ -73,21 +73,31 @@ export interface HealthDto {
   events: number;
 }
 
-const eventTypes = [
-  "conversation.created", "conversation.started", "conversation.paused", "conversation.completed",
-  "agent.connected", "agent.disconnected", "subagent.spawned", "subagent.completed", "subagent.terminated",
-  "task.created", "task.delegated", "task.completed", "message.created", "message.routed", "message.delivered",
-  "workspace.created", "workspace.changed", "workspace.review_requested", "workspace.conflict_detected", "workspace.merged",
-  "memory.recalled", "memory.reinforced", "knowledge.proposed", "knowledge.validated", "knowledge.promoted",
-  "benchmark.started", "benchmark.completed", "candidate.promoted", "candidate.rejected", "package.installed", "package.updated",
-  "federation.peer_connected", "federation.task_sent", "federation.task_received", "federation.failed",
-] as const;
+const API_TOKEN_KEY = "agent2agent.apiToken";
+
+export function getApiToken(): string {
+  if (typeof sessionStorage === "undefined") return "";
+  return sessionStorage.getItem(API_TOKEN_KEY) ?? "";
+}
+
+export function setApiToken(token: string): void {
+  if (typeof sessionStorage === "undefined") return;
+  const value = token.trim();
+  if (value) sessionStorage.setItem(API_TOKEN_KEY, value);
+  else sessionStorage.removeItem(API_TOKEN_KEY);
+}
+
+function authorizedHeaders(): Record<string, string> {
+  const token = getApiToken();
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
     headers: {
       accept: "application/json",
+      ...authorizedHeaders(),
       ...(init?.body ? { "content-type": "application/json" } : {}),
       ...(init?.headers ?? {}),
     },
@@ -154,26 +164,84 @@ export async function fetchEvents(after?: string): Promise<EventDto[]> {
 }
 
 export function subscribeEvents(onEvent: (event: EventDto) => void, onConnection: (connected: boolean) => void): () => void {
-  const source = new EventSource("/api/v1/events/stream");
-  const listeners = new Map<string, EventListener>();
-  const handle = (raw: Event): void => {
-    const event = raw as MessageEvent<string>;
-    try {
-      onEvent(JSON.parse(event.data) as EventDto);
-    } catch {
-      // Ignore malformed events. The next canonical event will still arrive.
+  const controller = new AbortController();
+  let stopped = false;
+  let lastEventId = "";
+
+  const connect = async (): Promise<void> => {
+    while (!stopped) {
+      try {
+        const response = await fetch("/api/v1/events/stream", {
+          signal: controller.signal,
+          headers: {
+            accept: "text/event-stream",
+            ...authorizedHeaders(),
+            ...(lastEventId ? { "last-event-id": lastEventId } : {}),
+          },
+        });
+        if (!response.ok) throw new Error(`Event stream failed: ${response.status} ${response.statusText}`);
+        if (!response.body) throw new Error("Event stream response had no body");
+        onConnection(true);
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (!stopped) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+          let boundary = buffer.indexOf("\n\n");
+          while (boundary >= 0) {
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const parsed = parseSseFrame(frame);
+            if (parsed?.id) lastEventId = parsed.id;
+            if (parsed?.event) onEvent(parsed.event);
+            boundary = buffer.indexOf("\n\n");
+          }
+        }
+      } catch (error) {
+        if (stopped || controller.signal.aborted) break;
+        console.warn("Agent2Agent event stream disconnected", error);
+      } finally {
+        onConnection(false);
+      }
+      if (!stopped) await delay(1_500, controller.signal).catch(() => {});
     }
   };
-  for (const type of eventTypes) {
-    const listener: EventListener = handle;
-    listeners.set(type, listener);
-    source.addEventListener(type, listener);
-  }
-  source.onopen = () => onConnection(true);
-  source.onerror = () => onConnection(false);
+
+  void connect();
   return () => {
-    for (const [type, listener] of listeners) source.removeEventListener(type, listener);
-    source.close();
+    stopped = true;
+    controller.abort();
     onConnection(false);
   };
+}
+
+function parseSseFrame(frame: string): { id?: string; event?: EventDto } | undefined {
+  let id: string | undefined;
+  const data: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (!line || line.startsWith(":")) continue;
+    if (line.startsWith("id:")) id = line.slice(3).trimStart();
+    else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  }
+  if (data.length === 0) return id ? { id } : undefined;
+  try {
+    const event = JSON.parse(data.join("\n")) as EventDto;
+    return { ...(id ? { id } : {}), event };
+  } catch {
+    return id ? { id } : undefined;
+  }
+}
+
+async function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const timer = window.setTimeout(resolve, milliseconds);
+    signal.addEventListener("abort", () => {
+      window.clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
 }
