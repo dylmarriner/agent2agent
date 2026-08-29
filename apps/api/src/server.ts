@@ -3,6 +3,7 @@ import { CollectiveError } from "../../../packages/core/src/index.js";
 import type { CollaborationIntent, CollectiveEvent, RegisteredAgent } from "../../../packages/protocol/src/index.js";
 import type { AcpTrustStatus } from "../../../packages/acp/src/index.js";
 import type { ControlPlaneRuntime } from "./runtime.js";
+import { bearerTokenMatches } from "./security.js";
 
 export type { ControlPlaneRuntime } from "./runtime.js";
 
@@ -25,14 +26,28 @@ export interface PublicAgentDto {
   supportsTools: boolean;
 }
 
+export interface ApiServerOptions {
+  apiToken?: string;
+}
+
 const collaborationIntents = new Set<CollaborationIntent>([
   "ask", "delegate", "research", "review", "critique", "verify", "test", "debug",
   "improve", "compare", "challenge", "teach", "summarize", "vote", "synthesize",
   "spawn-specialist", "merge-findings", "request-memory", "publish-knowledge", "request-skill",
 ]);
 
-export function buildApiServer(runtime: ControlPlaneRuntime): FastifyInstance {
+export function buildApiServer(runtime: ControlPlaneRuntime, options: ApiServerOptions = {}): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
+  const apiToken = options.apiToken?.trim() || undefined;
+
+  if (apiToken) {
+    app.addHook("onRequest", async (request, reply) => {
+      const authorization = typeof request.headers.authorization === "string" ? request.headers.authorization : undefined;
+      if (bearerTokenMatches(authorization, apiToken)) return;
+      reply.header("www-authenticate", "Bearer realm=\"agent2agent\"");
+      return reply.code(401).send({ error: { code: "unauthorized", message: "Valid Agent2Agent bearer token required" } });
+    });
+  }
 
   app.setErrorHandler((error: unknown, _request, reply) => {
     const message = error instanceof Error ? error.message : String(error);
@@ -205,11 +220,11 @@ export function toPublicEvent(event: CollectiveEvent): CollectiveEvent {
     id: event.id,
     type: event.type,
     nodeId: event.nodeId,
-    at: event.at,
-    data: sanitizePublicValue(event.data),
     ...(event.conversationId ? { conversationId: event.conversationId } : {}),
     ...(event.taskId ? { taskId: event.taskId } : {}),
     ...(event.agentId ? { agentId: event.agentId } : {}),
+    at: event.at,
+    data: sanitizePublicValue(event.data),
   };
 }
 
