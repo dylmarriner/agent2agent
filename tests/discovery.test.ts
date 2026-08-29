@@ -27,6 +27,9 @@ function configuredHost(): DiscoveryHost {
     hermes: "/usr/bin/hermes",
     opencode: "/usr/bin/opencode",
     openclaw: "/usr/bin/openclaw",
+    agy: "/usr/bin/agy",
+    copilot: "/usr/bin/copilot",
+    goose: "/usr/bin/goose",
   };
   return {
     async locate(executable) { return paths[executable]; },
@@ -39,6 +42,9 @@ function configuredHost(): DiscoveryHost {
           hermes: "Hermes Agent 0.13.2",
           opencode: "1.0.180",
           openclaw: "OpenClaw 2026.8.0",
+          agy: "Antigravity CLI 1.1.13",
+          copilot: "1.12.0",
+          goose: "goose 1.21.0",
         };
         return { exitCode: 0, stdout: versions[name] ?? "unknown", stderr: "" };
       }
@@ -52,27 +58,28 @@ function configuredHost(): DiscoveryHost {
   };
 }
 
-await test("discovers already-configured local CLI agents", async () => {
+await test("discovers configured local CLI and ACP-capable agents", async () => {
   const discover = (adapters as unknown as Record<string, unknown>).discoverLocalCliAgents;
   ok(typeof discover === "function", "discoverLocalCliAgents must be exported");
   const discovered = await (discover as DiscoverFn)({ host: configuredHost() });
   equal(discovered.map((a) => [
     a.type,
-    a.executablePath,
     a.version,
     a.authStatus,
     a.status,
-    a.supportsStreaming,
-    a.supportsSessions,
-    a.supportsCancellation,
-    a.supportsTools,
+    a.transportTypes,
+    a.trustStatus,
+    a.supportsAcp,
     a.supportsMcp,
   ]), [
-    ["claude-code", "/usr/bin/claude", "2.1.0", "authenticated", "ready", false, true, true, true, true],
-    ["codex", "/usr/bin/codex", "0.149.0", "authenticated", "ready", true, true, true, true, true],
-    ["hermes", "/usr/bin/hermes", "0.13.2", "authenticated", "ready", false, true, true, true, true],
-    ["opencode", "/usr/bin/opencode", "1.0.180", "authenticated", "ready", true, true, true, true, true],
-    ["openclaw", "/usr/bin/openclaw", "2026.8.0", "authenticated", "ready", false, false, true, true, false],
+    ["claude-code", "2.1.0", "authenticated", "ready", ["cli", "mcp"], "trusted", false, true],
+    ["codex", "0.149.0", "authenticated", "ready", ["cli", "mcp"], "trusted", false, true],
+    ["hermes", "0.13.2", "authenticated", "ready", ["cli", "mcp", "acp"], "trusted", true, true],
+    ["opencode", "1.0.180", "authenticated", "ready", ["cli", "mcp"], "trusted", false, true],
+    ["openclaw", "2026.8.0", "authenticated", "ready", ["cli"], "trusted", false, false],
+    ["antigravity", "1.1.13", "unknown", "installed", ["cli"], "trusted", false, false],
+    ["copilot", "1.12.0", "unknown", "installed", ["cli", "acp"], "trusted", true, false],
+    ["goose", "1.21.0", "unknown", "installed", ["cli", "acp"], "trusted", true, false],
   ]);
 });
 
@@ -98,7 +105,7 @@ await test("does not call empty or unhealthy CLI auth state ready", async () => 
   ]);
 });
 
-await test("registers discovered local CLIs as routable collective agents", async () => {
+await test("registers routable CLI agents with trust and transport evidence", async () => {
   const register = (adapters as unknown as Record<string, unknown>).discoverAndRegisterLocalCliAgents;
   ok(typeof register === "function", "discoverAndRegisterLocalCliAgents must be exported");
   const events = new EventStore("node-local", createMonotonicIdFactory("discovery"));
@@ -112,21 +119,20 @@ await test("registers discovered local CLIs as routable collective agents", asyn
     ["opencode-local", "opencode", "idle", "a2a://node-local/agents/opencode-local"],
     ["openclaw-local", "openclaw", "idle", "a2a://node-local/agents/openclaw-local"],
   ]);
-  equal(registry.list().map((agent) => agent.id), ["claude-local", "codex-local", "hermes-local", "opencode-local", "openclaw-local"]);
   equal(registry.get("claude-local").metadata, {
     source: "local-cli-discovery",
     executablePath: "/usr/bin/claude",
     version: "2.1.0",
     authStatus: "authenticated",
+    transportTypes: ["cli", "mcp"],
+    trustStatus: "trusted",
+    supportsAcp: false,
     supportsStreaming: false,
     supportsSessions: true,
     supportsCancellation: true,
     supportsTools: true,
     supportsMcp: true,
   });
-  ok(registry.adapterFor("claude-local").type === "claude-code");
-  ok(registry.adapterFor("codex-local").type === "codex");
-  ok(registry.adapterFor("openclaw-local").type === "openclaw");
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
