@@ -65,6 +65,7 @@ function makeRuntime(): ControlPlaneRuntime {
     registry,
     conversations,
     dispatcher,
+    persistence: "memory",
     async trustAgent(agentId, trustStatus) {
       const agent = registry.get(agentId);
       return {
