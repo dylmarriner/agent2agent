@@ -23,8 +23,17 @@ import type { AcpConnector, AcpTrustStatus } from "../../../packages/acp/src/ind
 import {
   ConversationRuntime,
   InMemoryConversationRepository,
+  type ConversationRepository,
 } from "../../../packages/conversation/src/index.js";
 import { ConversationDispatcher } from "../../../packages/conversation/src/dispatcher.js";
+import { DurableEventStore } from "../../../packages/database/src/durable-events.js";
+import {
+  PostgresConversationRepository,
+  PostgresEventJournal,
+  createPgRuntimeDatabase,
+  ensureRuntimeSchema,
+  type PgRuntimeDatabase,
+} from "../../../packages/database/src/runtime.js";
 import type { RegisteredAgent } from "../../../packages/protocol/src/index.js";
 
 export interface ControlPlaneRuntime {
@@ -34,6 +43,7 @@ export interface ControlPlaneRuntime {
   registry: AgentRegistry;
   conversations: ConversationRuntime;
   dispatcher: ConversationDispatcher;
+  persistence: "memory" | "postgres";
   trustAgent(agentId: string, trustStatus: AcpTrustStatus): Promise<RegisteredAgent>;
   close(): Promise<void>;
 }
@@ -46,6 +56,7 @@ export interface CreateControlPlaneRuntimeOptions {
   customAcpEndpoints?: CustomAcpEndpointInput[];
   installExecutor?: InstallExecutor;
   acpConnector?: AcpConnector;
+  runtimeDatabase?: PgRuntimeDatabase;
   env?: Record<string, string | undefined>;
 }
 
@@ -53,10 +64,31 @@ export async function createControlPlaneRuntime(options: CreateControlPlaneRunti
   const env = options.env ?? process.env;
   const nodeId = options.nodeId ?? env.AGENT2AGENT_NODE_ID ?? "local";
   const id = createMonotonicIdFactory(nodeId);
-  const events = new EventStore(nodeId, id);
-  const registry = new AgentRegistry(events);
   const startedAt = new Date().toISOString();
   const enableAcp = options.enableAcp ?? true;
+  const databaseUrl = env.DATABASE_URL?.trim();
+  const database = options.runtimeDatabase ?? (databaseUrl ? createPgRuntimeDatabase(databaseUrl) : undefined);
+  let durableEvents: DurableEventStore | undefined;
+  let events: EventStore;
+  let conversationRepository: ConversationRepository;
+
+  try {
+    if (database) {
+      await ensureRuntimeSchema(database);
+      const journal = new PostgresEventJournal(database);
+      durableEvents = await DurableEventStore.create({ nodeId, id, journal });
+      events = durableEvents;
+      conversationRepository = new PostgresConversationRepository(database);
+    } else {
+      events = new EventStore(nodeId, id);
+      conversationRepository = new InMemoryConversationRepository();
+    }
+  } catch (error) {
+    if (database && database !== options.runtimeDatabase) await database.close().catch(() => {});
+    throw error;
+  }
+
+  const registry = new AgentRegistry(events);
 
   if (options.autoInstall !== false) {
     const installedExecutables = await detectBootstrapExecutables();
@@ -99,7 +131,7 @@ export async function createControlPlaneRuntime(options: CreateControlPlaneRunti
     nodeId,
     id,
     events,
-    repository: new InMemoryConversationRepository(),
+    repository: conversationRepository,
     humanParticipantId: env.AGENT2AGENT_HUMAN_ID ?? "human:operator",
   });
   const dispatcher = new ConversationDispatcher({
@@ -117,6 +149,7 @@ export async function createControlPlaneRuntime(options: CreateControlPlaneRunti
     registry,
     conversations,
     dispatcher,
+    persistence: database ? "postgres" : "memory",
     async trustAgent(agentId, trustStatus) {
       const updated = await setAcpEndpointTrust({ registry, endpoints, agentId, trustStatus });
       events.publish("agent.connected", {
@@ -128,6 +161,8 @@ export async function createControlPlaneRuntime(options: CreateControlPlaneRunti
     },
     async close() {
       await dispatcher.close();
+      if (durableEvents) await durableEvents.close();
+      if (database) await database.close();
     },
   };
 }
