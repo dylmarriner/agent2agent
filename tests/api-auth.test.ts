@@ -50,6 +50,7 @@ function runtime(): ControlPlaneRuntime {
     registry,
     conversations,
     dispatcher,
+    persistence: "memory",
     async trustAgent(agentId) { return registry.get(agentId); },
     async close() { await dispatcher.close(); },
   };
