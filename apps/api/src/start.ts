@@ -1,10 +1,13 @@
 import { buildApiServer } from "./server.js";
 import { createControlPlaneRuntime } from "./runtime.js";
+import { assertSecureControlPlaneBind } from "./security.js";
 
 const runtime = await createControlPlaneRuntime();
-const app = buildApiServer(runtime);
 const host = process.env.AGENT2AGENT_HOST ?? "127.0.0.1";
 const port = readPort(process.env.AGENT2AGENT_PORT, 8787);
+const apiToken = process.env.AGENT2AGENT_API_TOKEN?.trim() || undefined;
+assertSecureControlPlaneBind(host, apiToken);
+const app = buildApiServer(runtime, { ...(apiToken ? { apiToken } : {}) });
 
 await app.listen({ host, port });
 console.log(`Agent2Agent control plane listening on http://${host}:${port}`);
