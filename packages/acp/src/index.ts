@@ -101,7 +101,13 @@ export class AcpAgentAdapter implements AgentAdapter {
       onPermission: this.permissionHandler,
     });
     const cwd = metadataString(options.metadata?.cwd) ?? this.endpoint.cwd ?? process.cwd();
-    const vendorSessionId = await connection.newSession(cwd, this.endpoint.mcpServers);
+    let vendorSessionId: string;
+    try {
+      vendorSessionId = await connection.newSession(cwd, this.endpoint.mcpServers);
+    } catch (error) {
+      try { await connection.close(); } catch { /* preserve session initialization error */ }
+      throw error;
+    }
     const session: AgentSession = {
       id: `acp-${this.endpoint.id}-${++this.sessionCounter}`,
       agentId: agent.id,
@@ -120,6 +126,7 @@ export class AcpAgentAdapter implements AgentAdapter {
     if (!vendorSessionId) throw new Error(`ACP session ${session.id} has no vendor session id`);
     const text = request.content.map((part) => part.type === "text" ? part.text : part.type === "json" ? JSON.stringify(part.value) : part.uri).join("\n\n");
     const onAbort = (): void => { void active.connection.cancel(vendorSessionId); };
+    if (context.signal?.aborted) throw context.signal.reason ?? new Error("ACP prompt aborted");
     context.signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const result = await active.connection.prompt(vendorSessionId, text, context.signal);
@@ -229,7 +236,8 @@ export const connectAcpProcess: AcpConnector = async (config, handlers) => {
         mcpServers: mcpServers as acp.McpServer[],
       });
     },
-    async prompt(sessionId, text, _signal) {
+    async prompt(sessionId, text, signal) {
+      if (signal?.aborted) throw signal.reason ?? new Error("ACP prompt aborted");
       const texts: string[] = [];
       const listener = (event: AgentEvent): void => {
         if (event.type === "delta" && event.data && typeof event.data === "object") {
