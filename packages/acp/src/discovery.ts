@@ -95,12 +95,28 @@ export async function discoverAcpEndpoints(options: DiscoverAcpEndpointsOptions)
     };
   }));
 
+  const discoveredKnown = known.filter((value): value is DiscoveredAcpEndpoint => value !== undefined);
+  const reservedEndpointIds = new Set(KNOWN_ACP_SPECS.map((spec) => spec.id));
+  const reservedCanonicalIds = new Set(KNOWN_ACP_SPECS.map((spec) => spec.canonicalAgentId));
+  const seenEndpointIds = new Set(discoveredKnown.map((endpoint) => endpoint.id));
+  const seenCanonicalIds = new Set(discoveredKnown.map((endpoint) => canonicalIdentityFor(endpoint).id));
   const custom: DiscoveredAcpEndpoint[] = [];
+
   for (const input of options.customEndpoints ?? []) {
+    const id = input.id.trim();
+    if (!id) throw new Error("Custom ACP endpoint id is required");
+    if (reservedEndpointIds.has(id) || seenEndpointIds.has(id)) {
+      throw new Error(`Custom ACP endpoint id ${id} is reserved or duplicate`);
+    }
+    const canonicalId = id;
+    if (reservedCanonicalIds.has(canonicalId) || seenCanonicalIds.has(canonicalId)) {
+      throw new Error(`Custom ACP canonical identity ${canonicalId} collides with an existing agent`);
+    }
+
     const path = await resolveConfiguredCommand(options.host, input.command);
     if (!path) continue;
-    custom.push({
-      id: input.id,
+    const endpoint: DiscoveredAcpEndpoint = {
+      id,
       type: input.type,
       command: path,
       args: [...(input.args ?? [])],
@@ -108,10 +124,13 @@ export async function discoverAcpEndpoints(options: DiscoverAcpEndpointsOptions)
       ...(input.cwd ? { cwd: input.cwd } : {}),
       trustStatus: input.trustStatus ?? "pending-trust",
       source: "custom",
-    });
+    };
+    custom.push(endpoint);
+    seenEndpointIds.add(id);
+    seenCanonicalIds.add(canonicalId);
   }
 
-  return [...known.filter((value): value is DiscoveredAcpEndpoint => value !== undefined), ...custom];
+  return [...discoveredKnown, ...custom];
 }
 
 async function resolveConfiguredCommand(host: AcpDiscoveryHost, command: string): Promise<string | undefined> {
@@ -136,9 +155,12 @@ export interface RegisterAcpEndpointsOptions {
 
 export async function registerAcpEndpoints(options: RegisterAcpEndpointsOptions): Promise<RegisteredAgent[]> {
   const registered: RegisteredAgent[] = [];
+  const canonicalIds = new Set<string>();
 
   for (const endpoint of options.endpoints) {
     const canonical = canonicalIdentityFor(endpoint);
+    if (canonicalIds.has(canonical.id)) throw new Error(`Duplicate ACP canonical agent identity: ${canonical.id}`);
+    canonicalIds.add(canonical.id);
     const inner = new AcpAgentAdapter(endpoint, options.connector);
     const adapter = bindAdapterType(inner, `acp:${endpoint.id}`);
     options.registry.registerAdapter(adapter);
@@ -186,8 +208,10 @@ export interface SetAcpEndpointTrustOptions {
 }
 
 export async function setAcpEndpointTrust(options: SetAcpEndpointTrustOptions): Promise<RegisteredAgent> {
-  const endpoint = options.endpoints.find((candidate) => canonicalIdentityFor(candidate).id === options.agentId);
-  if (!endpoint) throw new Error(`Agent ${options.agentId} is not backed by a discovered ACP endpoint`);
+  const matches = options.endpoints.filter((candidate) => canonicalIdentityFor(candidate).id === options.agentId);
+  if (matches.length === 0) throw new Error(`Agent ${options.agentId} is not backed by a discovered ACP endpoint`);
+  if (matches.length > 1) throw new Error(`Agent ${options.agentId} has ambiguous ACP endpoint bindings`);
+  const endpoint = matches[0]!;
   endpoint.trustStatus = options.trustStatus;
 
   const existing = options.registry.get(options.agentId);
