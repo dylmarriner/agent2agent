@@ -9,7 +9,7 @@ async function test(name: string, fn: () => void | Promise<void>): Promise<void>
 }
 function ok(value: unknown, message = "Expected truthy value"): asserts value { if (!value) throw new Error(message); }
 
-await test("web control center is wired to canonical API and SSE rather than mock transcripts", async () => {
+await test("web control center is wired to canonical API and authenticated SSE rather than mock transcripts", async () => {
   const [app, api, conversation, directory, graph] = await Promise.all([
     readFile("apps/web/src/app.tsx", "utf8"),
     readFile("apps/web/src/api.ts", "utf8"),
@@ -20,7 +20,10 @@ await test("web control center is wired to canonical API and SSE rather than moc
   ok(api.includes("/api/v1/agents"));
   ok(api.includes("/api/v1/conversations"));
   ok(api.includes("/api/v1/events/stream"));
-  ok(api.includes("EventSource"));
+  ok(api.includes("sessionStorage"), "API token must stay session-scoped in the browser");
+  ok(api.toLowerCase().includes("authorization"), "API requests must support bearer authorization");
+  ok(api.includes("getReader"), "SSE must use authenticated fetch streaming");
+  ok(!api.includes("new EventSource"), "native EventSource cannot attach the bearer token");
   ok(conversation.includes("@collective"));
   ok(directory.includes("trustStatus"));
   ok(graph.includes("recipientAgentIds"));
