@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 export function isLoopbackHost(host: string): boolean {
   const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
@@ -16,11 +16,9 @@ export function assertSecureControlPlaneBind(host: string, apiToken: string | un
 }
 
 export function bearerTokenMatches(authorization: string | undefined, expectedToken: string): boolean {
-  if (!expectedToken) return false;
-  if (!authorization?.startsWith("Bearer ")) return false;
+  if (!expectedToken || !authorization?.startsWith("Bearer ")) return false;
   const supplied = authorization.slice("Bearer ".length);
-  const suppliedBytes = Buffer.from(supplied, "utf8");
-  const expectedBytes = Buffer.from(expectedToken, "utf8");
-  if (suppliedBytes.length !== expectedBytes.length) return false;
-  return timingSafeEqual(suppliedBytes, expectedBytes);
+  const suppliedDigest = createHash("sha256").update(supplied, "utf8").digest();
+  const expectedDigest = createHash("sha256").update(expectedToken, "utf8").digest();
+  return timingSafeEqual(suppliedDigest, expectedDigest);
 }
