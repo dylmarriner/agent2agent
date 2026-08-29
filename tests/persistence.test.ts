@@ -1,8 +1,8 @@
 import type { AgentMessage, CollectiveEvent } from "../packages/protocol/src/index.js";
 import type { ConversationRecord, UnsequencedAgentMessage } from "../packages/conversation/src/index.js";
 import { createMonotonicIdFactory } from "../packages/core/src/index.js";
+import { DurableEventStore } from "../packages/database/src/durable-events.js";
 import {
-  DurableEventStore,
   PostgresConversationRepository,
   PostgresEventJournal,
   ensureRuntimeSchema,
