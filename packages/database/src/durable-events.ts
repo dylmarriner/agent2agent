@@ -13,6 +13,7 @@ export interface CreateDurableEventStoreOptions {
   replayLimit?: number;
 }
 
+/** EventStore implementation that replays persisted history and serializes new journal writes. */
 export class DurableEventStore extends EventStore {
   private readonly history: CollectiveEvent[];
   private readonly listeners = new Set<(event: CollectiveEvent) => void>();
@@ -30,6 +31,7 @@ export class DurableEventStore extends EventStore {
     this.history = history.map((event) => structuredClone(event));
   }
 
+  /** Hydrates the newest configured replay window without re-emitting historical events. */
   static async create(options: CreateDurableEventStoreOptions): Promise<DurableEventStore> {
     const history = await options.journal.list(options.replayLimit ?? 50_000);
     const ids = new Set<string>();
@@ -54,14 +56,19 @@ export class DurableEventStore extends EventStore {
       at: new Date().toISOString(),
       data,
     };
-    this.history.push(structuredClone(event));
-    for (const listener of this.listeners) listener(structuredClone(event));
+    const historyEvent = structuredClone(event);
     const persisted = structuredClone(event) as CollectiveEvent;
+    this.history.push(historyEvent);
+
+    // Queue persistence before user callbacks run. A throwing subscriber may reject
+    // the synchronous publish call, but it cannot make an accepted event vanish on restart.
     this.persistenceTail = this.persistenceTail
       .then(() => this.journal.append(persisted))
       .catch((error: unknown) => {
         this.persistenceError ??= error;
       });
+
+    for (const listener of this.listeners) listener(structuredClone(event));
     return structuredClone(event);
   }
 
@@ -76,6 +83,7 @@ export class DurableEventStore extends EventStore {
     return () => this.listeners.delete(listener);
   }
 
+  /** Waits until all accepted events have reached the durable journal. */
   async flush(): Promise<void> {
     await this.persistenceTail;
     if (this.persistenceError !== undefined) {
@@ -85,10 +93,14 @@ export class DurableEventStore extends EventStore {
     }
   }
 
+  /** Stops new publishes, flushes durability, and always releases subscribers. */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    await this.flush();
-    this.listeners.clear();
+    try {
+      await this.flush();
+    } finally {
+      this.listeners.clear();
+    }
   }
 }
