@@ -40,11 +40,15 @@ class RecordingSql implements SqlExecutor {
 
 class FakeRuntimeDatabase extends RecordingSql implements PgRuntimeDatabase {
   closeCalls = 0;
+  failEventWrites = false;
+
+  override async query<Row = Record<string, unknown>>(text: string, values: readonly unknown[] = []): Promise<SqlQueryResult<Row>> {
+    if (this.failEventWrites && text.includes("INSERT INTO a2a_runtime_events")) throw new Error("journal unavailable");
+    return super.query<Row>(text, values);
+  }
+
   async close(): Promise<void> { this.closeCalls += 1; }
 }
-
-type JournalCtor = new (sql: SqlExecutor, nodeId?: string) => PostgresEventJournal;
-type ConversationCtor = new (sql: SqlExecutor, nodeId?: string) => PostgresConversationRepository;
 
 await test("durable publish queues persistence even when a subscriber throws", async () => {
   const persisted: CollectiveEvent[] = [];
@@ -68,8 +72,7 @@ await test("durable publish queues persistence even when a subscriber throws", a
 
 await test("event replay is node-scoped and requests the newest bounded window", async () => {
   const sql = new RecordingSql();
-  const Journal = PostgresEventJournal as unknown as JournalCtor;
-  const journal = new Journal(sql, "node-a");
+  const journal = new PostgresEventJournal(sql, "node-a");
   await journal.list(25);
   const call = sql.calls.at(-1);
   ok(call);
@@ -81,8 +84,7 @@ await test("event replay is node-scoped and requests the newest bounded window",
 
 await test("conversation reads are scoped to the owning node", async () => {
   const sql = new RecordingSql();
-  const Repository = PostgresConversationRepository as unknown as ConversationCtor;
-  const repository = new Repository(sql, "node-a");
+  const repository = new PostgresConversationRepository(sql, "node-a");
   await repository.getConversation("conversation-1");
   await repository.listConversations();
   const reads = sql.calls.filter((call) => call.text.includes("FROM a2a_runtime_conversations"));
@@ -104,6 +106,47 @@ await test("caller-owned runtime databases remain open after runtime shutdown", 
   });
   await runtime.close();
   equal(database.closeCalls, 0);
+});
+
+await test("standalone runtime closes its owned database when later startup validation fails", async () => {
+  const database = new FakeRuntimeDatabase();
+  let threw = false;
+  try {
+    await createControlPlaneRuntime({
+      nodeId: "node-startup-failure",
+      autoInstall: false,
+      enableAcp: false,
+      runtimeDatabaseFactory: () => database,
+      env: {
+        AGENT2AGENT_NODE_ID: "node-startup-failure",
+        DATABASE_URL: "postgres://test/agent2agent",
+        AGENT2AGENT_MAX_CONVERSATION_HOPS: "0",
+      },
+    });
+  } catch { threw = true; }
+  ok(threw, "invalid runtime limits must fail startup");
+  equal(database.closeCalls, 1);
+});
+
+await test("standalone runtime closes its owned database even when durable flush fails", async () => {
+  const database = new FakeRuntimeDatabase();
+  const runtime = await createControlPlaneRuntime({
+    nodeId: "node-close-failure",
+    autoInstall: false,
+    enableAcp: false,
+    runtimeDatabaseFactory: () => database,
+    env: {
+      AGENT2AGENT_NODE_ID: "node-close-failure",
+      DATABASE_URL: "postgres://test/agent2agent",
+    },
+  });
+  database.failEventWrites = true;
+  runtime.events.publish("message.created", { messageId: "must-fail-flush" });
+  let threw = false;
+  try { await runtime.close(); }
+  catch { threw = true; }
+  ok(threw, "durability failure must be surfaced to the caller");
+  equal(database.closeCalls, 1);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
