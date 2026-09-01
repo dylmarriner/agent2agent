@@ -56,10 +56,14 @@ export interface CreateControlPlaneRuntimeOptions {
   customAcpEndpoints?: CustomAcpEndpointInput[];
   installExecutor?: InstallExecutor;
   acpConnector?: AcpConnector;
+  /** Caller-owned database. Agent2Agent uses it but never closes it. */
   runtimeDatabase?: PgRuntimeDatabase;
+  /** Injectable factory for standalone database ownership and deterministic tests. */
+  runtimeDatabaseFactory?: (connectionString: string) => PgRuntimeDatabase;
   env?: Record<string, string | undefined>;
 }
 
+/** Builds the local control plane and guarantees cleanup of resources it owns if startup fails. */
 export async function createControlPlaneRuntime(options: CreateControlPlaneRuntimeOptions = {}): Promise<ControlPlaneRuntime> {
   const env = options.env ?? process.env;
   const nodeId = options.nodeId ?? env.AGENT2AGENT_NODE_ID ?? "local";
@@ -67,104 +71,142 @@ export async function createControlPlaneRuntime(options: CreateControlPlaneRunti
   const startedAt = new Date().toISOString();
   const enableAcp = options.enableAcp ?? true;
   const databaseUrl = env.DATABASE_URL?.trim();
-  const database = options.runtimeDatabase ?? (databaseUrl ? createPgRuntimeDatabase(databaseUrl) : undefined);
+  const ownsDatabase = options.runtimeDatabase === undefined && Boolean(databaseUrl);
+  const databaseFactory = options.runtimeDatabaseFactory ?? createPgRuntimeDatabase;
+  const database = options.runtimeDatabase ?? (databaseUrl ? databaseFactory(databaseUrl) : undefined);
+
   let durableEvents: DurableEventStore | undefined;
-  let events: EventStore;
-  let conversationRepository: ConversationRepository;
+  let dispatcher: ConversationDispatcher | undefined;
 
   try {
+    let events: EventStore;
+    let conversationRepository: ConversationRepository;
+
     if (database) {
       await ensureRuntimeSchema(database);
-      const journal = new PostgresEventJournal(database);
+      const journal = new PostgresEventJournal(database, nodeId);
       durableEvents = await DurableEventStore.create({ nodeId, id, journal });
       events = durableEvents;
-      conversationRepository = new PostgresConversationRepository(database);
+      conversationRepository = new PostgresConversationRepository(database, nodeId);
     } else {
       events = new EventStore(nodeId, id);
       conversationRepository = new InMemoryConversationRepository();
     }
-  } catch (error) {
-    if (database && database !== options.runtimeDatabase) await database.close().catch(() => {});
-    throw error;
-  }
 
-  const registry = new AgentRegistry(events);
+    const registry = new AgentRegistry(events);
 
-  if (options.autoInstall !== false) {
-    const installedExecutables = await detectBootstrapExecutables();
-    try {
-      const result = await bootstrapMissingRuntimes({
-        installedExecutables,
-        enableAcp,
-        ...(options.desiredRuntimeIds ? { desiredRuntimeIds: options.desiredRuntimeIds } : {}),
-        env,
-        ...(options.installExecutor ? { execute: options.installExecutor } : {}),
-      });
-      for (const runtimeId of result.installed) {
-        events.publish("package.installed", { runtimeId, source: "automatic-bootstrap" });
+    if (options.autoInstall !== false) {
+      const installedExecutables = await detectBootstrapExecutables();
+      try {
+        const result = await bootstrapMissingRuntimes({
+          installedExecutables,
+          enableAcp,
+          ...(options.desiredRuntimeIds ? { desiredRuntimeIds: options.desiredRuntimeIds } : {}),
+          env,
+          ...(options.installExecutor ? { execute: options.installExecutor } : {}),
+        });
+        for (const runtimeId of result.installed) {
+          events.publish("package.installed", { runtimeId, source: "automatic-bootstrap" });
+        }
+      } catch (error) {
+        events.publish("package.updated", {
+          status: "bootstrap-failed",
+          message: error instanceof Error ? error.message : String(error),
+        });
       }
-    } catch (error) {
-      events.publish("package.updated", {
-        status: "bootstrap-failed",
-        message: error instanceof Error ? error.message : String(error),
+    }
+
+    await discoverAndRegisterLocalCliAgents({ registry, nodeId });
+
+    let endpoints: DiscoveredAcpEndpoint[] = [];
+    if (enableAcp) {
+      endpoints = await discoverAcpEndpoints({
+        host: defaultLocalCliDiscoveryHost,
+        customEndpoints: options.customAcpEndpoints ?? parseCustomAcpEndpoints(env.AGENT2AGENT_ACP_ENDPOINTS_JSON),
+      });
+      await registerAcpEndpoints({
+        registry,
+        nodeId,
+        endpoints,
+        ...(options.acpConnector ? { connector: options.acpConnector } : {}),
       });
     }
-  }
 
-  await discoverAndRegisterLocalCliAgents({ registry, nodeId });
-
-  let endpoints: DiscoveredAcpEndpoint[] = [];
-  if (enableAcp) {
-    endpoints = await discoverAcpEndpoints({
-      host: defaultLocalCliDiscoveryHost,
-      customEndpoints: options.customAcpEndpoints ?? parseCustomAcpEndpoints(env.AGENT2AGENT_ACP_ENDPOINTS_JSON),
-    });
-    await registerAcpEndpoints({
-      registry,
+    const conversations = new ConversationRuntime({
       nodeId,
-      endpoints,
-      ...(options.acpConnector ? { connector: options.acpConnector } : {}),
+      id,
+      events,
+      repository: conversationRepository,
+      humanParticipantId: env.AGENT2AGENT_HUMAN_ID ?? "human:operator",
     });
+    dispatcher = new ConversationDispatcher({
+      registry,
+      conversations,
+      events,
+      maxAgentHops: readPositiveInteger(env.AGENT2AGENT_MAX_CONVERSATION_HOPS, 6),
+      maxActiveSessions: readPositiveInteger(env.AGENT2AGENT_MAX_CONVERSATION_SESSIONS, 64),
+    });
+
+    let closed = false;
+    return {
+      nodeId,
+      startedAt,
+      events,
+      registry,
+      conversations,
+      dispatcher,
+      persistence: database ? "postgres" : "memory",
+      async trustAgent(agentId, trustStatus) {
+        const updated = await setAcpEndpointTrust({ registry, endpoints, agentId, trustStatus });
+        events.publish("agent.connected", {
+          agentId: updated.id,
+          trustStatus,
+          reason: "trust-transition",
+        }, { agentId: updated.id });
+        return updated;
+      },
+      async close() {
+        if (closed) return;
+        closed = true;
+        await closeRuntimeResources({
+          dispatcher,
+          durableEvents,
+          ownedDatabase: ownsDatabase ? database : undefined,
+        });
+      },
+    };
+  } catch (error) {
+    await closeRuntimeResources({
+      dispatcher,
+      durableEvents,
+      ownedDatabase: ownsDatabase ? database : undefined,
+    }).catch(() => {
+      // Startup failure remains authoritative; cleanup is best-effort here.
+    });
+    throw error;
   }
+}
 
-  const conversations = new ConversationRuntime({
-    nodeId,
-    id,
-    events,
-    repository: conversationRepository,
-    humanParticipantId: env.AGENT2AGENT_HUMAN_ID ?? "human:operator",
-  });
-  const dispatcher = new ConversationDispatcher({
-    registry,
-    conversations,
-    events,
-    maxAgentHops: readPositiveInteger(env.AGENT2AGENT_MAX_CONVERSATION_HOPS, 6),
-    maxActiveSessions: readPositiveInteger(env.AGENT2AGENT_MAX_CONVERSATION_SESSIONS, 64),
-  });
+interface RuntimeResources {
+  dispatcher?: ConversationDispatcher;
+  durableEvents?: DurableEventStore;
+  ownedDatabase?: PgRuntimeDatabase;
+}
 
-  return {
-    nodeId,
-    startedAt,
-    events,
-    registry,
-    conversations,
-    dispatcher,
-    persistence: database ? "postgres" : "memory",
-    async trustAgent(agentId, trustStatus) {
-      const updated = await setAcpEndpointTrust({ registry, endpoints, agentId, trustStatus });
-      events.publish("agent.connected", {
-        agentId: updated.id,
-        trustStatus,
-        reason: "trust-transition",
-      }, { agentId: updated.id });
-      return updated;
-    },
-    async close() {
-      await dispatcher.close();
-      if (durableEvents) await durableEvents.close();
-      if (database) await database.close();
-    },
+/** Attempts every owned cleanup step and rethrows the first failure after later resources are released. */
+async function closeRuntimeResources(resources: RuntimeResources): Promise<void> {
+  let firstError: unknown;
+  const attempt = async (close: (() => Promise<void>) | undefined): Promise<void> => {
+    if (!close) return;
+    try { await close(); }
+    catch (error) { firstError ??= error; }
   };
+
+  await attempt(resources.dispatcher ? () => resources.dispatcher!.close() : undefined);
+  await attempt(resources.durableEvents ? () => resources.durableEvents!.close() : undefined);
+  await attempt(resources.ownedDatabase ? () => resources.ownedDatabase!.close() : undefined);
+
+  if (firstError !== undefined) throw firstError;
 }
 
 async function detectBootstrapExecutables(): Promise<string[]> {
