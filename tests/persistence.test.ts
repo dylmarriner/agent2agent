@@ -1,8 +1,8 @@
 import type { AgentMessage, CollectiveEvent } from "../packages/protocol/src/index.js";
 import type { ConversationRecord, UnsequencedAgentMessage } from "../packages/conversation/src/index.js";
-import { EventStore, createMonotonicIdFactory } from "../packages/core/src/index.js";
+import { createMonotonicIdFactory } from "../packages/core/src/index.js";
+import { DurableEventStore } from "../packages/database/src/durable-events.js";
 import {
-  EventPersistenceBridge,
   PostgresConversationRepository,
   PostgresEventJournal,
   ensureRuntimeSchema,
@@ -82,11 +82,12 @@ await test("runtime schema creates text-identity conversation, message and event
   ok(ddl.includes("a2a_runtime_events"));
   ok(ddl.includes("sender_participant_id text"));
   ok(ddl.includes("participant_ids jsonb"));
+  ok(ddl.includes("a2a_runtime_events_node_order_idx"));
 });
 
 await test("conversation repository persists human participants and allocates atomic per-conversation sequences", async () => {
   const sql = new ScriptedSql();
-  const repository = new PostgresConversationRepository(sql);
+  const repository = new PostgresConversationRepository(sql, conversation.nodeId);
   await repository.saveConversation(conversation);
   const [first, second] = await Promise.all([
     repository.appendMessage(pendingMessage),
@@ -95,6 +96,7 @@ await test("conversation repository persists human participants and allocates at
   equal([first.sequence, second.sequence].sort((a, b) => a - b), [1, 2]);
   ok(sql.calls.some((call) => call.text.includes("ON CONFLICT (conversation_id) DO UPDATE")));
   ok(sql.calls.some((call) => call.values.includes("human:operator")));
+  ok(sql.calls.some((call) => call.values.includes(conversation.nodeId)));
 });
 
 await test("conversation repository reconstructs canonical records without losing lineage", async () => {
@@ -114,7 +116,7 @@ await test("conversation repository reconstructs canonical records without losin
     parent_message_id: "message_parent",
     round: 3,
   }];
-  const repository = new PostgresConversationRepository(sql);
+  const repository = new PostgresConversationRepository(sql, conversation.nodeId);
   equal(await repository.getConversation(conversation.id), conversation);
   const messages = await repository.listMessages(conversation.id);
   equal(messages[0]?.senderAgentId, "human:operator");
@@ -126,7 +128,7 @@ await test("conversation repository reconstructs canonical records without losin
 
 await test("event journal preserves event order for restart replay", async () => {
   const sql = new ScriptedSql();
-  const journal = new PostgresEventJournal(sql);
+  const journal = new PostgresEventJournal(sql, conversation.nodeId);
   const event: CollectiveEvent = {
     id: "evt_local_1",
     type: "message.created",
@@ -141,8 +143,8 @@ await test("event journal preserves event order for restart replay", async () =>
   equal(await journal.list(), [event]);
 });
 
-await test("event store hydrates restart history and persistence bridge flushes new events", async () => {
-  const event: CollectiveEvent = {
+await test("durable event store hydrates restart history and flushes new events", async () => {
+  const historical: CollectiveEvent = {
     id: "evt_persisted_1",
     type: "conversation.started",
     nodeId: "local",
@@ -150,18 +152,20 @@ await test("event store hydrates restart history and persistence bridge flushes 
     at: "2026-08-28T09:59:59.000Z",
     data: { restored: true },
   };
-  const events = new EventStore("local", createMonotonicIdFactory("persist-bridge"));
-  events.hydrate([event]);
-  equal(events.list(), [event]);
-
   const persisted: CollectiveEvent[] = [];
-  const bridge = new EventPersistenceBridge(events, {
-    async append(next) { persisted.push(next); },
+  const store = await DurableEventStore.create({
+    nodeId: "local",
+    id: createMonotonicIdFactory("persist-bridge"),
+    journal: {
+      async list() { return [historical]; },
+      async append(next: CollectiveEvent) { persisted.push(next); },
+    },
   });
-  const live = events.publish("message.created", { messageId: "live" }, { conversationId: conversation.id });
-  await bridge.flush();
+  equal(store.list(), [historical]);
+  const live = store.publish("message.created", { messageId: "live" }, { conversationId: conversation.id });
+  await store.flush();
   equal(persisted.map((entry) => entry.id), [live.id]);
-  await bridge.close();
+  await store.close();
 });
 
 function rowForMessage(message: AgentMessage): Record<string, unknown> {
