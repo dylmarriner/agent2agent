@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS a2a_runtime_conversations (
   updated_at timestamptz NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS a2a_runtime_conversations_node_created_idx
+  ON a2a_runtime_conversations(node_id, created_at, id);
+
 CREATE TABLE IF NOT EXISTS a2a_runtime_conversation_sequences (
   conversation_id text PRIMARY KEY REFERENCES a2a_runtime_conversations(id) ON DELETE CASCADE,
   next_sequence bigint NOT NULL CHECK (next_sequence >= 1)
@@ -66,20 +69,26 @@ CREATE TABLE IF NOT EXISTS a2a_runtime_events (
   created_at timestamptz NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS a2a_runtime_events_node_order_idx
+  ON a2a_runtime_events(node_id, event_order);
 CREATE INDEX IF NOT EXISTS a2a_runtime_events_conversation_idx
   ON a2a_runtime_events(conversation_id, event_order);
 CREATE INDEX IF NOT EXISTS a2a_runtime_events_type_idx
   ON a2a_runtime_events(type, event_order);
 `;
 
+/** Ensures the control-plane persistence schema exists before repositories are used. */
 export async function ensureRuntimeSchema(sql: SqlExecutor): Promise<void> {
   await sql.query(RUNTIME_SCHEMA_SQL);
 }
 
 export class PostgresConversationRepository implements ConversationRepository {
-  constructor(private readonly sql: SqlExecutor) {}
+  constructor(private readonly sql: SqlExecutor, private readonly nodeId: string) {
+    assertNodeId(nodeId);
+  }
 
   async saveConversation(record: ConversationRecord): Promise<void> {
+    if (record.nodeId !== this.nodeId) throw new Error(`Conversation ${record.id} belongs to node ${record.nodeId}, not ${this.nodeId}`);
     await this.sql.query(
       `INSERT INTO a2a_runtime_conversations
         (id, node_id, title, objective, status, participant_ids, created_at, updated_at)
@@ -90,7 +99,8 @@ export class PostgresConversationRepository implements ConversationRepository {
          objective = EXCLUDED.objective,
          status = EXCLUDED.status,
          participant_ids = EXCLUDED.participant_ids,
-         updated_at = EXCLUDED.updated_at`,
+         updated_at = EXCLUDED.updated_at
+       WHERE a2a_runtime_conversations.node_id = EXCLUDED.node_id`,
       [record.id, record.nodeId, record.title, record.objective, record.status, JSON.stringify(record.participantIds), record.createdAt, record.updatedAt],
     );
   }
@@ -98,8 +108,8 @@ export class PostgresConversationRepository implements ConversationRepository {
   async getConversation(id: string): Promise<ConversationRecord | undefined> {
     const result = await this.sql.query<ConversationRow>(
       `SELECT id, node_id, title, objective, status, participant_ids, created_at, updated_at
-       FROM a2a_runtime_conversations WHERE id = $1`,
-      [id],
+       FROM a2a_runtime_conversations WHERE id = $1 AND node_id = $2`,
+      [id, this.nodeId],
     );
     return result.rows[0] ? mapConversationRow(result.rows[0]) : undefined;
   }
@@ -107,7 +117,8 @@ export class PostgresConversationRepository implements ConversationRepository {
   async listConversations(): Promise<ConversationRecord[]> {
     const result = await this.sql.query<ConversationRow>(
       `SELECT id, node_id, title, objective, status, participant_ids, created_at, updated_at
-       FROM a2a_runtime_conversations ORDER BY created_at ASC, id ASC`,
+       FROM a2a_runtime_conversations WHERE node_id = $1 ORDER BY created_at ASC, id ASC`,
+      [this.nodeId],
     );
     return result.rows.map(mapConversationRow);
   }
@@ -116,15 +127,17 @@ export class PostgresConversationRepository implements ConversationRepository {
     return this.sql.transaction(async (tx) => {
       const sequenceResult = await tx.query<{ sequence: string | number }>(
         `INSERT INTO a2a_runtime_conversation_sequences (conversation_id, next_sequence)
-         VALUES ($1, 2)
+         SELECT id, 2 FROM a2a_runtime_conversations WHERE id = $1 AND node_id = $2
          ON CONFLICT (conversation_id) DO UPDATE
            SET next_sequence = a2a_runtime_conversation_sequences.next_sequence + 1
          RETURNING next_sequence - 1 AS sequence`,
-        [message.conversationId],
+        [message.conversationId, this.nodeId],
       );
       const rawSequence = sequenceResult.rows[0]?.sequence;
       const sequence = Number(rawSequence);
-      if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error(`Database returned invalid message sequence: ${String(rawSequence)}`);
+      if (!Number.isSafeInteger(sequence) || sequence < 1) {
+        throw new Error(`Conversation ${message.conversationId} does not belong to node ${this.nodeId} or returned an invalid sequence`);
+      }
 
       await tx.query(
         `INSERT INTO a2a_runtime_messages
@@ -155,8 +168,12 @@ export class PostgresConversationRepository implements ConversationRepository {
   async getMessage(conversationId: string, messageId: string): Promise<AgentMessage | undefined> {
     const result = await this.sql.query<MessageRow>(
       `${MESSAGE_SELECT}
-       WHERE conversation_id = $1 AND id = $2`,
-      [conversationId, messageId],
+       WHERE conversation_id = $1 AND id = $2
+         AND EXISTS (
+           SELECT 1 FROM a2a_runtime_conversations c
+           WHERE c.id = a2a_runtime_messages.conversation_id AND c.node_id = $3
+         )`,
+      [conversationId, messageId, this.nodeId],
     );
     return result.rows[0] ? mapMessageRow(result.rows[0]) : undefined;
   }
@@ -164,8 +181,13 @@ export class PostgresConversationRepository implements ConversationRepository {
   async listMessages(conversationId: string): Promise<AgentMessage[]> {
     const result = await this.sql.query<MessageRow>(
       `${MESSAGE_SELECT}
-       WHERE conversation_id = $1 ORDER BY sequence ASC`,
-      [conversationId],
+       WHERE conversation_id = $1
+         AND EXISTS (
+           SELECT 1 FROM a2a_runtime_conversations c
+           WHERE c.id = a2a_runtime_messages.conversation_id AND c.node_id = $2
+         )
+       ORDER BY sequence ASC`,
+      [conversationId, this.nodeId],
     );
     return result.rows.map(mapMessageRow);
   }
@@ -176,9 +198,12 @@ const MESSAGE_SELECT = `SELECT id, conversation_id, sender_participant_id, recip
   routing_metadata, created_at FROM a2a_runtime_messages`;
 
 export class PostgresEventJournal {
-  constructor(private readonly sql: SqlExecutor) {}
+  constructor(private readonly sql: SqlExecutor, private readonly nodeId: string) {
+    assertNodeId(nodeId);
+  }
 
   async append(event: CollectiveEvent): Promise<void> {
+    if (event.nodeId !== this.nodeId) throw new Error(`Event ${event.id} belongs to node ${event.nodeId}, not ${this.nodeId}`);
     await this.sql.query(
       `INSERT INTO a2a_runtime_events
         (id, type, node_id, conversation_id, task_id, agent_id, data, created_at)
@@ -201,8 +226,15 @@ export class PostgresEventJournal {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100_000) throw new Error("Event replay limit must be between 1 and 100000");
     const result = await this.sql.query<EventRow>(
       `SELECT event_order, id, type, node_id, conversation_id, task_id, agent_id, data, created_at
-       FROM a2a_runtime_events ORDER BY event_order ASC LIMIT $1`,
-      [limit],
+       FROM (
+         SELECT event_order, id, type, node_id, conversation_id, task_id, agent_id, data, created_at
+         FROM a2a_runtime_events
+         WHERE node_id = $1
+         ORDER BY event_order DESC
+         LIMIT $2
+       ) recent
+       ORDER BY event_order ASC`,
+      [this.nodeId, limit],
     );
     return result.rows.map(mapEventRow);
   }
@@ -212,6 +244,7 @@ export interface PgRuntimeDatabase extends SqlExecutor {
   close(): Promise<void>;
 }
 
+/** Creates the PostgreSQL executor owned by a standalone Agent2Agent runtime. */
 export function createPgRuntimeDatabase(connectionString: string): PgRuntimeDatabase {
   if (!connectionString.trim()) throw new Error("PostgreSQL connection string is required");
   const pool = new Pool({ connectionString, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 8_000 });
@@ -332,6 +365,10 @@ function mapEventRow(row: EventRow): CollectiveEvent {
     at: isoDate(row.created_at),
     data: row.data,
   };
+}
+
+function assertNodeId(nodeId: string): void {
+  if (!nodeId.trim()) throw new Error("Runtime node id is required for PostgreSQL isolation");
 }
 
 function isoDate(value: unknown): string {
