@@ -188,9 +188,9 @@ export async function createControlPlaneRuntime(options: CreateControlPlaneRunti
 }
 
 interface RuntimeResources {
-  dispatcher?: ConversationDispatcher;
-  durableEvents?: DurableEventStore;
-  ownedDatabase?: PgRuntimeDatabase;
+  dispatcher: ConversationDispatcher | undefined;
+  durableEvents: DurableEventStore | undefined;
+  ownedDatabase: PgRuntimeDatabase | undefined;
 }
 
 /** Attempts every owned cleanup step and rethrows the first failure after later resources are released. */
