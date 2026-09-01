@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { RUNTIME_SCHEMA_SQL } from "../packages/database/src/runtime.js";
 
 let passed = 0;
@@ -26,7 +27,7 @@ await test("fresh runtime schema constrains parent messages to the same conversa
 });
 
 await test("upgrade migration replaces the existing single-column parent foreign key", async () => {
-  const path = new URL("../packages/database/migrations/0003_same_conversation_lineage.sql", import.meta.url);
+  const path = resolve(process.cwd(), "packages/database/migrations/0003_same_conversation_lineage.sql");
   const migration = normalized(await readFile(path, "utf8"));
   ok(migration.includes("unique (conversation_id, id)"), "upgrade must add the composite unique key");
   ok(migration.includes("foreign key (conversation_id, parent_message_id)"), "upgrade must add composite parent FK");
