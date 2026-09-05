@@ -21,6 +21,7 @@
     "validate": "npm run typecheck && npm run web:typecheck && npm run lint && npm run test && npm run web:build && npm run demo"
   },
   "dependencies": {
+    "@a2a-js/sdk": "1.1.0",
     "@agentclientprotocol/sdk": "1.4.0",
     "@modelcontextprotocol/server": "2.0.0",
     "fastify": "5.12.1",
