@@ -101,7 +101,8 @@ await test("inbound A2A work becomes a durable canonical conversation and runs t
   });
   const contextId = "remote-context-17";
   const taskId = "remote-task-17";
-  const request = {
+  const request: SendMessageRequest = {
+    tenant: "",
     message: {
       role: Role.ROLE_USER,
       messageId: "remote-message-17",
@@ -116,8 +117,9 @@ await test("inbound A2A work becomes a durable canonical conversation and runs t
       extensions: [],
       referenceTaskIds: [],
     },
-    configuration: { acceptedOutputModes: ["text"], returnImmediately: false },
-  } as SendMessageRequest;
+    configuration: { acceptedOutputModes: ["text"], returnImmediately: false, taskPushNotificationConfig: undefined },
+    metadata: {},
+  };
   const requestContext = new RequestContext(
     request,
     taskId,
