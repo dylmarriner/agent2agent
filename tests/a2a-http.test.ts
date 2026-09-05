@@ -56,7 +56,8 @@ await test("Fastify serves a current Agent Card and accepts official A2A JSON-RP
       role: Role.ROLE_USER,
       messageId: "wire-message-1",
       contextId: "wire-context-1",
-      taskId: "wire-task-1",
+      // Empty means this is a new task. The receiving A2A server allocates the task id.
+      taskId: "",
       parts: [{ content: { $case: "text", value: "Review the auth patch" }, mediaType: "text/plain", filename: "", metadata: {} }],
       metadata: { "agent2agent.peerId": "wire-peer", "agent2agent.targetAgentIds": ["codex-local"], "agent2agent.intent": "review" },
       extensions: [], referenceTaskIds: [],
@@ -74,10 +75,11 @@ await test("Fastify serves a current Agent Card and accepts official A2A JSON-RP
   const rpc = rpcResponse.json<{ id: string; result?: { task?: { id?: string; contextId?: string } }; error?: unknown }>();
   equal(rpc.id, "req-1");
   equal(rpc.error, undefined);
-  equal(rpc.result?.task?.id, "wire-task-1");
+  ok(typeof rpc.result?.task?.id === "string" && rpc.result.task.id.length > 0, "A2A server must allocate a task id");
   equal(rpc.result?.task?.contextId, "wire-context-1");
   const transcript = await runtime.conversations.messages("a2a:wire-context-1");
   equal(transcript.map((message) => message.senderAgentId), ["a2a:wire-peer", "codex-local"]);
+  equal(transcript[0]?.taskId, rpc.result?.task?.id);
 
   await runtime.dispatcher.close();
   await app.close();
