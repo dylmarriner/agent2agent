@@ -73,16 +73,21 @@ export class A2aRemoteAdapter implements AgentAdapter {
     if (!state) throw new Error(`Unknown A2A session ${session.id}`);
     const peer = this.peer(state.agentId);
     if (peer.trustStatus !== "trusted") throw new Error(`A2A peer ${state.agentId} is ${peer.trustStatus}`);
-    const taskId = context.taskId ?? state.options.taskId;
+    const localTaskId = context.taskId ?? state.options.taskId;
     const outbound: SendMessageRequest = {
       tenant: "",
       message: {
         role: Role.ROLE_USER,
         messageId: randomUUID(),
         contextId: context.conversationId,
-        taskId: taskId ?? "",
+        // A2A task identifiers are owned by the remote server. Only send one when continuing a task it assigned earlier.
+        taskId: state.taskId ?? "",
         parts: request.content.map(internalPartToA2a),
-        metadata: { "agent2agent.originNodeId": this.options.nodeId, "agent2agent.intent": request.intent },
+        metadata: {
+          "agent2agent.originNodeId": this.options.nodeId,
+          "agent2agent.intent": request.intent,
+          ...(localTaskId ? { "agent2agent.localTaskId": localTaskId } : {}),
+        },
         extensions: [], referenceTaskIds: [],
       },
       configuration: { acceptedOutputModes: ["text"], returnImmediately: false, taskPushNotificationConfig: undefined },
@@ -90,17 +95,21 @@ export class A2aRemoteAdapter implements AgentAdapter {
     };
     try {
       const result = await this.driver.sendMessage(peer.card, outbound, context.signal);
-      const remoteTaskId = "id" in result ? result.id : (result.taskId || taskId);
+      const remoteTaskId = "id" in result ? result.id : result.taskId;
       if (remoteTaskId) state.taskId = remoteTaskId;
       this.options.events.publish("federation.task_sent", {
-        agentId: state.agentId, remoteTaskId, contextId: context.conversationId, protocolVersion: preferredProtocolVersion(peer.card),
-      }, { conversationId: context.conversationId, ...(taskId ? { taskId } : {}), agentId: state.agentId });
+        agentId: state.agentId,
+        remoteTaskId,
+        localTaskId,
+        contextId: context.conversationId,
+        protocolVersion: preferredProtocolVersion(peer.card),
+      }, { conversationId: context.conversationId, ...(localTaskId ? { taskId: localTaskId } : {}), agentId: state.agentId });
       return normalizeResult(result);
     } catch (error) {
       this.options.events.publish("federation.failed", {
         direction: "outbound", agentId: state.agentId, contextId: context.conversationId,
         message: error instanceof Error ? error.message : String(error),
-      }, { conversationId: context.conversationId, ...(taskId ? { taskId } : {}), agentId: state.agentId });
+      }, { conversationId: context.conversationId, ...(localTaskId ? { taskId: localTaskId } : {}), agentId: state.agentId });
       throw error;
     }
   }
@@ -115,6 +124,10 @@ export class A2aRemoteAdapter implements AgentAdapter {
     if (!card.supportedInterfaces.some((item) => item.protocolVersion === A2A_PROTOCOL_VERSION)) throw new Error(`A2A peer ${agentId} does not advertise protocol ${A2A_PROTOCOL_VERSION}`);
     this.peers.set(agentId, { cardUrl, card: structuredClone(card), trustStatus });
     return structuredClone(card);
+  }
+  setPeerTrust(agentId: string, trustStatus: PeerTrust): void {
+    const peer = this.peer(agentId);
+    peer.trustStatus = trustStatus;
   }
   private peer(agentId: string): PeerState {
     const peer = this.peers.get(agentId);
