@@ -21,6 +21,11 @@ import {
 } from "../../../packages/acp/src/discovery.js";
 import type { AcpConnector, AcpTrustStatus } from "../../../packages/acp/src/index.js";
 import {
+  A2aRemoteAdapter,
+  registerRemoteA2aPeer,
+  type A2aClientDriver,
+} from "../../../packages/a2a/src/index.js";
+import {
   ConversationRuntime,
   InMemoryConversationRepository,
   type ConversationRepository,
@@ -48,6 +53,12 @@ export interface ControlPlaneRuntime {
   close(): Promise<void>;
 }
 
+export interface RemoteA2aPeerInput {
+  id: string;
+  cardUrl: string;
+  trustStatus?: AcpTrustStatus;
+}
+
 export interface CreateControlPlaneRuntimeOptions {
   nodeId?: string;
   autoInstall?: boolean;
@@ -56,6 +67,8 @@ export interface CreateControlPlaneRuntimeOptions {
   customAcpEndpoints?: CustomAcpEndpointInput[];
   installExecutor?: InstallExecutor;
   acpConnector?: AcpConnector;
+  remoteA2aPeers?: RemoteA2aPeerInput[];
+  a2aClientDriver?: A2aClientDriver;
   /** Caller-owned database. Agent2Agent uses it but never closes it. */
   runtimeDatabase?: PgRuntimeDatabase;
   /** Injectable factory for standalone database ownership and deterministic tests. */
@@ -132,6 +145,32 @@ export async function createControlPlaneRuntime(options: CreateControlPlaneRunti
       });
     }
 
+    const remoteA2aPeers = normalizeRemoteA2aPeers(
+      options.remoteA2aPeers ?? parseRemoteA2aPeers(env.AGENT2AGENT_A2A_PEERS_JSON),
+    );
+    let a2aAdapter: A2aRemoteAdapter | undefined;
+    if (remoteA2aPeers.length > 0) {
+      a2aAdapter = new A2aRemoteAdapter({
+        nodeId,
+        events,
+        ...(options.a2aClientDriver ? { driver: options.a2aClientDriver } : {}),
+      });
+      registry.registerAdapter(a2aAdapter);
+      for (const peer of remoteA2aPeers) {
+        if (registry.list().some((agent) => agent.id === peer.id)) {
+          throw new Error(`Remote A2A peer id ${peer.id} collides with an existing agent`);
+        }
+        await registerRemoteA2aPeer({
+          registry,
+          adapter: a2aAdapter,
+          nodeId,
+          agentId: peer.id,
+          cardUrl: peer.cardUrl,
+          trustStatus: peer.trustStatus ?? "pending-trust",
+        });
+      }
+    }
+
     const conversations = new ConversationRuntime({
       nodeId,
       id,
@@ -157,7 +196,23 @@ export async function createControlPlaneRuntime(options: CreateControlPlaneRunti
       dispatcher,
       persistence: database ? "postgres" : "memory",
       async trustAgent(agentId, trustStatus) {
-        const updated = await setAcpEndpointTrust({ registry, endpoints, agentId, trustStatus });
+        const current = registry.get(agentId);
+        let updated: RegisteredAgent;
+        if (current.adapterType === "a2a") {
+          if (!a2aAdapter) throw new Error(`Agent ${agentId} is not backed by a discovered A2A endpoint`);
+          a2aAdapter.setPeerTrust(agentId, trustStatus);
+          updated = {
+            ...current,
+            status: trustStatus === "trusted"
+              ? (current.status === "busy" ? "busy" : "idle")
+              : trustStatus === "disabled" ? "disabled" : "degraded",
+            metadata: { ...current.metadata, trustStatus },
+          };
+          registry.remove(agentId);
+          updated = registry.register(updated);
+        } else {
+          updated = await setAcpEndpointTrust({ registry, endpoints, agentId, trustStatus });
+        }
         events.publish("agent.connected", {
           agentId: updated.id,
           trustStatus,
@@ -250,6 +305,45 @@ function parseCustomAcpEndpoints(value: string | undefined): CustomAcpEndpointIn
       ...(typeof record.cwd === "string" ? { cwd: record.cwd } : {}),
       ...(trustStatus ? { trustStatus } : {}),
     };
+  });
+}
+
+function parseRemoteA2aPeers(value: string | undefined): RemoteA2aPeerInput[] {
+  if (!value?.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("AGENT2AGENT_A2A_PEERS_JSON must contain valid JSON");
+  }
+  if (!Array.isArray(parsed)) throw new Error("AGENT2AGENT_A2A_PEERS_JSON must be an array");
+  return parsed.map((entry, index) => {
+    if (!entry || typeof entry !== "object") throw new Error(`A2A peer ${index} must be an object`);
+    const record = entry as Record<string, unknown>;
+    if (typeof record.id !== "string" || !record.id.trim()) throw new Error(`A2A peer ${index} requires string id`);
+    if (typeof record.cardUrl !== "string" || !record.cardUrl.trim()) throw new Error(`A2A peer ${index} requires string cardUrl`);
+    const trustStatus = record.trustStatus;
+    if (trustStatus !== undefined && trustStatus !== "trusted" && trustStatus !== "pending-trust" && trustStatus !== "disabled") {
+      throw new Error(`A2A peer ${index} has invalid trustStatus`);
+    }
+    return {
+      id: record.id.trim(),
+      cardUrl: record.cardUrl.trim(),
+      ...(trustStatus ? { trustStatus } : {}),
+    };
+  });
+}
+
+function normalizeRemoteA2aPeers(peers: RemoteA2aPeerInput[]): RemoteA2aPeerInput[] {
+  const seen = new Set<string>();
+  return peers.map((peer, index) => {
+    const id = peer.id.trim();
+    const cardUrl = peer.cardUrl.trim();
+    if (!id) throw new Error(`A2A peer ${index} requires string id`);
+    if (!cardUrl) throw new Error(`A2A peer ${index} requires string cardUrl`);
+    if (seen.has(id)) throw new Error(`Duplicate A2A peer id ${id}`);
+    seen.add(id);
+    return { id, cardUrl, ...(peer.trustStatus ? { trustStatus: peer.trustStatus } : {}) };
   });
 }
 
