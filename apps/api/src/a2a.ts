@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { A2A_PROTOCOL_VERSION } from "@a2a-js/sdk";
+import { A2A_PROTOCOL_VERSION, type AgentCard, type SecurityRequirement } from "@a2a-js/sdk";
 import {
   DefaultRequestHandler,
   InMemoryTaskStore,
@@ -25,11 +25,13 @@ export interface A2aRouteRuntime {
 
 export interface A2aRouteOptions {
   baseUrl: string;
+  requiresBearerAuth?: boolean;
 }
 
 /** Registers the official A2A v1 discovery and JSON-RPC surfaces on the existing Fastify control plane. */
 export function registerA2aRoutes(app: FastifyInstance, runtime: A2aRouteRuntime, options: A2aRouteOptions): void {
   const card = createCollectiveAgentCard({ nodeId: runtime.nodeId, baseUrl: options.baseUrl, registry: runtime.registry });
+  if (options.requiresBearerAuth) applyBearerSecurity(card);
   const executor = new CollectiveA2aExecutor({
     nodeId: runtime.nodeId,
     registry: runtime.registry,
@@ -54,6 +56,44 @@ export function registerA2aRoutes(app: FastifyInstance, runtime: A2aRouteRuntime
     await streamJsonRpc(reply, result);
     return reply;
   });
+}
+
+/** Resolves the externally advertised A2A base URL without ever publishing wildcard bind addresses. */
+export function resolveAdvertisedA2aBaseUrl(host: string, port: number, configured?: string): string {
+  const explicit = configured?.trim();
+  if (explicit) return normalizeHttpBaseUrl(explicit);
+  const normalizedHost = host.trim();
+  if (normalizedHost === "0.0.0.0" || normalizedHost === "::" || normalizedHost === "[::]") {
+    throw new Error("AGENT2AGENT_A2A_BASE_URL is required when binding to a wildcard address so Agent2Agent can advertise a reachable public A2A URL");
+  }
+  const address = normalizedHost.includes(":") && !normalizedHost.startsWith("[") ? `[${normalizedHost}]` : normalizedHost;
+  return `http://${address}:${port}`;
+}
+
+function applyBearerSecurity(card: AgentCard): void {
+  const requirement: SecurityRequirement = { schemes: { agent2agentBearer: { list: [] } } };
+  card.securitySchemes = {
+    ...card.securitySchemes,
+    agent2agentBearer: {
+      scheme: {
+        $case: "httpAuthSecurityScheme",
+        value: {
+          description: "Bearer token required for Agent2Agent federation requests.",
+          scheme: "Bearer",
+          bearerFormat: "opaque",
+        },
+      },
+    },
+  };
+  card.securityRequirements = [requirement];
+  card.skills = card.skills.map((skill) => ({ ...skill, securityRequirements: [structuredClone(requirement)] }));
+}
+
+function normalizeHttpBaseUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("A2A advertised base URL must use http or https");
+  if (url.username || url.password) throw new Error("A2A advertised base URL must not contain credentials");
+  return url.toString().replace(/\/$/, "");
 }
 
 function bodyValue(value: unknown): string | Record<string, unknown> {
