@@ -8,7 +8,13 @@ import {
   type SendMessageResult,
   type StreamResponse,
 } from "@a2a-js/sdk";
-import { ClientFactory } from "@a2a-js/sdk/client";
+import {
+  ClientFactory,
+  DefaultAgentCardResolver,
+  JsonRpcTransportFactory,
+  RestTransportFactory,
+  createAuthenticatingFetchWithRetry,
+} from "@a2a-js/sdk/client";
 import type { EventStore } from "../../core/src/index.js";
 import type {
   AgentAdapter, AgentCapabilities, AgentContext, AgentHealth, AgentRequest, AgentResponse,
@@ -24,38 +30,60 @@ import {
   type A2aRegistry,
 } from "./common.js";
 
+export interface A2aClientRequestOptions {
+  signal?: AbortSignal;
+  bearerToken?: string;
+}
+
 export interface A2aClientDriver {
-  resolveAgentCard(cardUrl: string, signal?: AbortSignal): Promise<AgentCard>;
-  sendMessage(card: AgentCard, request: SendMessageRequest, signal?: AbortSignal): Promise<SendMessageResult>;
-  sendMessageStream?(card: AgentCard, request: SendMessageRequest, signal?: AbortSignal): AsyncIterable<StreamResponse>;
-  cancelTask(card: AgentCard, taskId: string, signal?: AbortSignal): Promise<void>;
+  resolveAgentCard(cardUrl: string, options?: A2aClientRequestOptions): Promise<AgentCard>;
+  sendMessage(card: AgentCard, request: SendMessageRequest, options?: A2aClientRequestOptions): Promise<SendMessageResult>;
+  sendMessageStream?(card: AgentCard, request: SendMessageRequest, options?: A2aClientRequestOptions): AsyncIterable<StreamResponse>;
+  cancelTask(card: AgentCard, taskId: string, options?: A2aClientRequestOptions): Promise<void>;
 }
 
 /** Uses the official A2A JS SDK for discovery, messaging, streaming, and cancellation. */
 export class OfficialA2aClientDriver implements A2aClientDriver {
-  private readonly factory = new ClientFactory();
-  async resolveAgentCard(cardUrl: string, signal?: AbortSignal): Promise<AgentCard> {
+  private readonly unauthenticatedFactory = new ClientFactory();
+
+  async resolveAgentCard(cardUrl: string, options?: A2aClientRequestOptions): Promise<AgentCard> {
     const url = validateRemoteUrl(cardUrl);
-    if (signal?.aborted) throw signal.reason ?? new Error("A2A Agent Card request aborted");
-    const client = await this.factory.createFromUrl(url.toString(), "");
-    return client.getAgentCard(signal ? { signal } : undefined);
+    if (options?.signal?.aborted) throw options.signal.reason ?? new Error("A2A Agent Card request aborted");
+    const client = await this.factoryFor(options?.bearerToken).createFromUrl(url.toString(), "");
+    return client.getAgentCard(options?.signal ? { signal: options.signal } : undefined);
   }
-  async sendMessage(card: AgentCard, request: SendMessageRequest, signal?: AbortSignal): Promise<SendMessageResult> {
-    const client = await this.factory.createFromAgentCard(card);
-    return client.sendMessage(request, signal ? { signal } : undefined);
+  async sendMessage(card: AgentCard, request: SendMessageRequest, options?: A2aClientRequestOptions): Promise<SendMessageResult> {
+    const client = await this.factoryFor(options?.bearerToken).createFromAgentCard(card);
+    return client.sendMessage(request, options?.signal ? { signal: options.signal } : undefined);
   }
-  async *sendMessageStream(card: AgentCard, request: SendMessageRequest, signal?: AbortSignal): AsyncGenerator<StreamResponse, void, undefined> {
-    const client = await this.factory.createFromAgentCard(card);
-    for await (const event of client.sendMessageStream(request, signal ? { signal } : undefined)) yield event;
+  async *sendMessageStream(card: AgentCard, request: SendMessageRequest, options?: A2aClientRequestOptions): AsyncGenerator<StreamResponse, void, undefined> {
+    const client = await this.factoryFor(options?.bearerToken).createFromAgentCard(card);
+    for await (const event of client.sendMessageStream(request, options?.signal ? { signal: options.signal } : undefined)) yield event;
   }
-  async cancelTask(card: AgentCard, taskId: string, signal?: AbortSignal): Promise<void> {
-    const client = await this.factory.createFromAgentCard(card);
-    await client.cancelTask({ id: taskId, tenant: "", metadata: {} }, signal ? { signal } : undefined);
+  async cancelTask(card: AgentCard, taskId: string, options?: A2aClientRequestOptions): Promise<void> {
+    const client = await this.factoryFor(options?.bearerToken).createFromAgentCard(card);
+    await client.cancelTask({ id: taskId, tenant: "", metadata: {} }, options?.signal ? { signal: options.signal } : undefined);
+  }
+
+  private factoryFor(bearerToken: string | undefined): ClientFactory {
+    const token = bearerToken?.trim();
+    if (!token) return this.unauthenticatedFactory;
+    const authenticatedFetch = createAuthenticatingFetchWithRetry(fetch, {
+      async headers() { return { Authorization: `Bearer ${token}` }; },
+      async shouldRetryWithHeaders() { return undefined; },
+    });
+    return new ClientFactory({
+      transports: [
+        new JsonRpcTransportFactory({ fetchImpl: authenticatedFetch }),
+        new RestTransportFactory({ fetchImpl: authenticatedFetch }),
+      ],
+      cardResolver: new DefaultAgentCardResolver({ fetchImpl: authenticatedFetch }),
+    });
   }
 }
 
 type PeerTrust = "trusted" | "pending-trust" | "disabled";
-interface PeerState { cardUrl: string; card: AgentCard; trustStatus: PeerTrust; }
+interface PeerState { cardUrl: string; card: AgentCard; trustStatus: PeerTrust; bearerToken?: string; }
 interface SessionState { agentId: string; options: AgentSessionOptions; taskId: string | undefined; }
 
 export interface A2aRemoteAdapterOptions { nodeId: string; events: EventStore; driver?: A2aClientDriver; }
@@ -76,7 +104,7 @@ export class A2aRemoteAdapter implements AgentAdapter {
     const peer = this.peer(agent.id);
     if (peer.trustStatus !== "trusted") return { ok: false, message: `A2A peer is ${peer.trustStatus}`, checkedAt: new Date().toISOString() };
     try {
-      await this.driver.resolveAgentCard(peer.cardUrl);
+      await this.driver.resolveAgentCard(peer.cardUrl, peerRequestOptions(peer));
       return { ok: true, message: "A2A Agent Card reachable", checkedAt: new Date().toISOString() };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error), checkedAt: new Date().toISOString() };
@@ -96,16 +124,17 @@ export class A2aRemoteAdapter implements AgentAdapter {
     if (peer.trustStatus !== "trusted") throw new Error(`A2A peer ${state.agentId} is ${peer.trustStatus}`);
     const localTaskId = context.taskId ?? state.options.taskId;
     const outbound = createOutboundRequest(this.options.nodeId, state, request, context, localTaskId);
+    const requestOptions = peerRequestOptions(peer, context.signal);
 
     try {
       let response: AgentResponse;
       let remoteTaskId: string | undefined;
       if (peer.card.capabilities?.streaming === true && this.driver.sendMessageStream) {
-        const streamed = await this.consumeStream(peer, state.agentId, outbound, context, localTaskId);
+        const streamed = await this.consumeStream(peer, state.agentId, outbound, context, localTaskId, requestOptions);
         response = streamed.response;
         remoteTaskId = streamed.remoteTaskId;
       } else {
-        const result = await this.driver.sendMessage(peer.card, outbound, context.signal);
+        const result = await this.driver.sendMessage(peer.card, outbound, requestOptions);
         remoteTaskId = resultTaskId(result);
         response = normalizeResult(result);
       }
@@ -128,20 +157,36 @@ export class A2aRemoteAdapter implements AgentAdapter {
   }
   async cancel(executionId: string): Promise<void> {
     const state = this.sessions.get(executionId);
-    if (state?.taskId) await this.driver.cancelTask(this.peer(state.agentId).card, state.taskId);
+    if (!state?.taskId) return;
+    const peer = this.peer(state.agentId);
+    await this.driver.cancelTask(peer.card, state.taskId, peerRequestOptions(peer));
   }
   async terminateSession(sessionId: string): Promise<void> { this.sessions.delete(sessionId); }
-  async resolveAndStorePeer(agentId: string, cardUrl: string, trustStatus: PeerTrust, signal?: AbortSignal): Promise<AgentCard> {
+  async resolveAndStorePeer(
+    agentId: string,
+    cardUrl: string,
+    trustStatus: PeerTrust,
+    options: A2aClientRequestOptions = {},
+  ): Promise<AgentCard> {
     const discoveryUrl = validateRemoteUrl(cardUrl);
-    const card = await this.driver.resolveAgentCard(discoveryUrl.toString(), signal);
+    const card = await this.driver.resolveAgentCard(discoveryUrl.toString(), options);
     const currentInterfaces = card.supportedInterfaces.filter((item) => item.protocolVersion === A2A_PROTOCOL_VERSION);
     if (currentInterfaces.length === 0) throw new Error(`A2A peer ${agentId} does not advertise protocol ${A2A_PROTOCOL_VERSION}`);
     for (const item of currentInterfaces) {
       const interfaceUrl = validateRemoteUrl(item.url);
       assertSameA2aOrigin(discoveryUrl, interfaceUrl);
     }
-    this.peers.set(agentId, { cardUrl: discoveryUrl.toString(), card: structuredClone(card), trustStatus });
-    return structuredClone(card);
+    const validatedCard: AgentCard = {
+      ...structuredClone(card),
+      supportedInterfaces: currentInterfaces.map((item) => structuredClone(item)),
+    };
+    this.peers.set(agentId, {
+      cardUrl: discoveryUrl.toString(),
+      card: validatedCard,
+      trustStatus,
+      ...(options.bearerToken?.trim() ? { bearerToken: options.bearerToken.trim() } : {}),
+    });
+    return structuredClone(validatedCard);
   }
   setPeerTrust(agentId: string, trustStatus: PeerTrust): void {
     const peer = this.peer(agentId);
@@ -159,11 +204,12 @@ export class A2aRemoteAdapter implements AgentAdapter {
     request: SendMessageRequest,
     context: AgentContext,
     localTaskId: string | undefined,
+    requestOptions: A2aClientRequestOptions,
   ): Promise<{ response: AgentResponse; remoteTaskId: string | undefined }> {
     const content: MessagePart[] = [];
     let remoteTaskId: string | undefined;
     let lastState: unknown;
-    for await (const event of this.driver.sendMessageStream!(peer.card, request, context.signal)) {
+    for await (const event of this.driver.sendMessageStream!(peer.card, request, requestOptions)) {
       const payload = event.payload;
       if (!payload) continue;
       switch (payload.$case) {
@@ -256,13 +302,17 @@ export interface RegisterRemoteA2aPeerOptions {
   cardUrl: string;
   trustStatus?: PeerTrust;
   signal?: AbortSignal;
+  bearerToken?: string;
 }
 
 export async function registerRemoteA2aPeer(options: RegisterRemoteA2aPeerOptions): Promise<RegisteredAgent> {
   const id = options.agentId.trim();
   if (!id || id.startsWith("human:")) throw new Error("Remote A2A agent id must be a non-human identifier");
   const trustStatus = options.trustStatus ?? "pending-trust";
-  const card = await options.adapter.resolveAndStorePeer(id, options.cardUrl, trustStatus, options.signal);
+  const card = await options.adapter.resolveAndStorePeer(id, options.cardUrl, trustStatus, {
+    ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.bearerToken?.trim() ? { bearerToken: options.bearerToken.trim() } : {}),
+  });
   return options.registry.register({
     id,
     nodeId: options.nodeId,
@@ -277,6 +327,13 @@ export async function registerRemoteA2aPeer(options: RegisterRemoteA2aPeerOption
       supportsA2a: true, supportsStreaming: card.capabilities?.streaming === true, supportsSessions: true, supportsCancellation: true, supportsTools: false,
     },
   });
+}
+
+function peerRequestOptions(peer: PeerState, signal?: AbortSignal): A2aClientRequestOptions {
+  return {
+    ...(signal ? { signal } : {}),
+    ...(peer.bearerToken ? { bearerToken: peer.bearerToken } : {}),
+  };
 }
 
 function createOutboundRequest(
