@@ -57,6 +57,10 @@ export interface RemoteA2aPeerInput {
   id: string;
   cardUrl: string;
   trustStatus?: AcpTrustStatus;
+  /** Preferred for environment-backed configuration: name of an env var containing the bearer token. */
+  bearerTokenEnv?: string;
+  /** Programmatic-only credential. Never copied into registry metadata or events. */
+  bearerToken?: string;
 }
 
 export interface CreateControlPlaneRuntimeOptions {
@@ -145,8 +149,9 @@ export async function createControlPlaneRuntime(options: CreateControlPlaneRunti
       });
     }
 
-    const remoteA2aPeers = normalizeRemoteA2aPeers(
-      options.remoteA2aPeers ?? parseRemoteA2aPeers(env.AGENT2AGENT_A2A_PEERS_JSON),
+    const remoteA2aPeers = resolveRemoteA2aPeers(
+      normalizeRemoteA2aPeers(options.remoteA2aPeers ?? parseRemoteA2aPeers(env.AGENT2AGENT_A2A_PEERS_JSON)),
+      env,
     );
     let a2aAdapter: A2aRemoteAdapter | undefined;
     if (remoteA2aPeers.length > 0) {
@@ -167,6 +172,7 @@ export async function createControlPlaneRuntime(options: CreateControlPlaneRunti
           agentId: peer.id,
           cardUrl: peer.cardUrl,
           trustStatus: peer.trustStatus ?? "pending-trust",
+          ...(peer.bearerToken ? { bearerToken: peer.bearerToken } : {}),
         });
       }
     }
@@ -248,6 +254,13 @@ interface RuntimeResources {
   ownedDatabase: PgRuntimeDatabase | undefined;
 }
 
+interface ResolvedRemoteA2aPeer {
+  id: string;
+  cardUrl: string;
+  trustStatus?: AcpTrustStatus;
+  bearerToken?: string;
+}
+
 /** Attempts every owned cleanup step and rethrows the first failure after later resources are released. */
 async function closeRuntimeResources(resources: RuntimeResources): Promise<void> {
   let firstError: unknown;
@@ -326,10 +339,18 @@ function parseRemoteA2aPeers(value: string | undefined): RemoteA2aPeerInput[] {
     if (trustStatus !== undefined && trustStatus !== "trusted" && trustStatus !== "pending-trust" && trustStatus !== "disabled") {
       throw new Error(`A2A peer ${index} has invalid trustStatus`);
     }
+    const bearerTokenEnv = record.bearerTokenEnv;
+    if (bearerTokenEnv !== undefined && (typeof bearerTokenEnv !== "string" || !bearerTokenEnv.trim())) {
+      throw new Error(`A2A peer ${index} bearerTokenEnv must be a non-empty string`);
+    }
+    if (record.bearerToken !== undefined) {
+      throw new Error(`A2A peer ${index} must use bearerTokenEnv instead of embedding bearerToken in AGENT2AGENT_A2A_PEERS_JSON`);
+    }
     return {
       id: record.id.trim(),
       cardUrl: record.cardUrl.trim(),
       ...(trustStatus ? { trustStatus } : {}),
+      ...(typeof bearerTokenEnv === "string" ? { bearerTokenEnv: bearerTokenEnv.trim() } : {}),
     };
   });
 }
@@ -339,11 +360,39 @@ function normalizeRemoteA2aPeers(peers: RemoteA2aPeerInput[]): RemoteA2aPeerInpu
   return peers.map((peer, index) => {
     const id = peer.id.trim();
     const cardUrl = peer.cardUrl.trim();
+    const bearerTokenEnv = peer.bearerTokenEnv?.trim();
+    const bearerToken = peer.bearerToken?.trim();
     if (!id) throw new Error(`A2A peer ${index} requires string id`);
     if (!cardUrl) throw new Error(`A2A peer ${index} requires string cardUrl`);
+    if (bearerTokenEnv && bearerToken) throw new Error(`A2A peer ${index} cannot specify both bearerTokenEnv and bearerToken`);
     if (seen.has(id)) throw new Error(`Duplicate A2A peer id ${id}`);
     seen.add(id);
-    return { id, cardUrl, ...(peer.trustStatus ? { trustStatus: peer.trustStatus } : {}) };
+    return {
+      id,
+      cardUrl,
+      ...(peer.trustStatus ? { trustStatus: peer.trustStatus } : {}),
+      ...(bearerTokenEnv ? { bearerTokenEnv } : {}),
+      ...(bearerToken ? { bearerToken } : {}),
+    };
+  });
+}
+
+function resolveRemoteA2aPeers(
+  peers: RemoteA2aPeerInput[],
+  env: Record<string, string | undefined>,
+): ResolvedRemoteA2aPeer[] {
+  return peers.map((peer, index) => {
+    let bearerToken = peer.bearerToken?.trim();
+    if (peer.bearerTokenEnv) {
+      bearerToken = env[peer.bearerTokenEnv]?.trim();
+      if (!bearerToken) throw new Error(`A2A peer ${index} bearerTokenEnv ${peer.bearerTokenEnv} is not set or is empty`);
+    }
+    return {
+      id: peer.id,
+      cardUrl: peer.cardUrl,
+      ...(peer.trustStatus ? { trustStatus: peer.trustStatus } : {}),
+      ...(bearerToken ? { bearerToken } : {}),
+    };
   });
 }
 
