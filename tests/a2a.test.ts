@@ -1,9 +1,11 @@
 import {
   A2A_PROTOCOL_VERSION,
   Role,
+  TaskState,
   type AgentCard,
   type Message,
   type SendMessageRequest,
+  type StreamResponse,
 } from "@a2a-js/sdk";
 import { DefaultExecutionEventBus, RequestContext, ServerCallContext } from "@a2a-js/sdk/server";
 import {
@@ -29,9 +31,27 @@ function equal(actual: unknown, expected: unknown): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`Expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
 }
 function ok(value: unknown, message = "Expected truthy value"): asserts value { if (!value) throw new Error(message); }
+async function rejection(fn: () => Promise<unknown>): Promise<string> {
+  try { await fn(); } catch (error) { return error instanceof Error ? error.message : String(error); }
+  throw new Error("Expected promise to reject");
+}
 
 function textPart(text: string) {
   return { content: { $case: "text" as const, value: text }, mediaType: "text/plain", filename: "", metadata: {} };
+}
+
+function remoteCard(interfaceUrl = "https://peer.example/a2a"): AgentCard {
+  return {
+    name: "Remote Security Reviewer",
+    description: "Independent remote reviewer",
+    supportedInterfaces: [{ url: interfaceUrl, protocolBinding: "JSONRPC", tenant: "", protocolVersion: A2A_PROTOCOL_VERSION }],
+    provider: { organization: "Remote Lab", url: "https://peer.example" },
+    version: "1.0.0",
+    capabilities: { streaming: true, pushNotifications: false, extensions: [], extendedAgentCard: false },
+    securitySchemes: {}, securityRequirements: [], defaultInputModes: ["text"], defaultOutputModes: ["text"],
+    skills: [{ id: "security-review", name: "Security review", description: "Review code", tags: ["security", "review"], examples: [], inputModes: ["text"], outputModes: ["text"], securityRequirements: [] }],
+    documentationUrl: "", signatures: [],
+  };
 }
 
 function makeCollective() {
@@ -120,17 +140,7 @@ await test("inbound A2A work becomes a durable canonical conversation and runs t
 await test("remote A2A peers use remote-owned task ids while preserving local correlation", async () => {
   const events = new EventStore("node-local", createMonotonicIdFactory("a2a-remote"));
   const registry = new AgentRegistry(events);
-  const card: AgentCard = {
-    name: "Remote Security Reviewer",
-    description: "Independent remote reviewer",
-    supportedInterfaces: [{ url: "https://peer.example/a2a", protocolBinding: "JSONRPC", tenant: "", protocolVersion: A2A_PROTOCOL_VERSION }],
-    provider: { organization: "Remote Lab", url: "https://peer.example" },
-    version: "1.0.0",
-    capabilities: { streaming: true, pushNotifications: false, extensions: [], extendedAgentCard: false },
-    securitySchemes: {}, securityRequirements: [], defaultInputModes: ["text"], defaultOutputModes: ["text"],
-    skills: [{ id: "security-review", name: "Security review", description: "Review code", tags: ["security", "review"], examples: [], inputModes: ["text"], outputModes: ["text"], securityRequirements: [] }],
-    documentationUrl: "", signatures: [],
-  };
+  const card = remoteCard();
   const captured: SendMessageRequest[] = [];
   const driver: A2aClientDriver = {
     async resolveAgentCard() { return card; },
@@ -174,6 +184,96 @@ await test("remote A2A peers use remote-owned task ids while preserving local co
   equal(captured[1]?.message?.taskId, "remote-task-77");
   equal(first.content, [{ type: "text", text: "Remote review passed" }]);
   equal(events.list("federation.task_sent").length, 2);
+});
+
+await test("remote A2A discovery blocks metadata targets and Agent Card endpoint pivots", async () => {
+  const events = new EventStore("node-safe", createMonotonicIdFactory("a2a-safe"));
+  let resolutions = 0;
+  const driver: A2aClientDriver = {
+    async resolveAgentCard() { resolutions += 1; return remoteCard("https://other.example/a2a"); },
+    async sendMessage() { throw new Error("unused"); },
+    async cancelTask() {},
+  };
+  const adapter = new A2aRemoteAdapter({ nodeId: "node-safe", events, driver });
+
+  const metadataError = await rejection(() => adapter.resolveAndStorePeer(
+    "metadata-peer", "http://169.254.169.254/latest/meta-data", "trusted",
+  ));
+  equal(resolutions, 0);
+  ok(/metadata|link-local|unsafe|blocked/i.test(metadataError));
+
+  const pivotError = await rejection(() => adapter.resolveAndStorePeer(
+    "pivot-peer", "https://peer.example/.well-known/agent-card.json", "trusted",
+  ));
+  equal(resolutions, 1);
+  ok(/origin|host|pivot|interface/i.test(pivotError));
+});
+
+await test("remote A2A streaming publishes canonical progress events and accumulates the final result", async () => {
+  const events = new EventStore("node-stream", createMonotonicIdFactory("a2a-stream"));
+  const registry = new AgentRegistry(events);
+  const card = remoteCard();
+  const captured: SendMessageRequest[] = [];
+  const driver: A2aClientDriver = {
+    async resolveAgentCard() { return card; },
+    async sendMessage() { throw new Error("blocking send must not be used for a streaming peer"); },
+    async *sendMessageStream(_card, request): AsyncGenerator<StreamResponse, void, undefined> {
+      captured.push(structuredClone(request));
+      const contextId = request.message?.contextId ?? "";
+      const taskId = "remote-stream-task";
+      yield {
+        payload: { $case: "task", value: {
+          id: taskId,
+          contextId,
+          status: { state: TaskState.TASK_STATE_WORKING, timestamp: new Date().toISOString(), message: undefined },
+          artifacts: [], history: [], metadata: {},
+        } },
+      };
+      yield {
+        payload: { $case: "artifactUpdate", value: {
+          taskId,
+          contextId,
+          artifact: {
+            artifactId: "artifact-1",
+            name: "Review result",
+            description: "Streaming review result",
+            parts: [textPart("streamed review passed")],
+            metadata: {}, extensions: [],
+          },
+          append: false,
+          lastChunk: true,
+          metadata: {},
+        } },
+      };
+      yield {
+        payload: { $case: "statusUpdate", value: {
+          taskId,
+          contextId,
+          status: { state: TaskState.TASK_STATE_COMPLETED, timestamp: new Date().toISOString(), message: undefined },
+          metadata: {},
+        } },
+      };
+    },
+    async cancelTask() {},
+  };
+  const adapter = new A2aRemoteAdapter({ nodeId: "node-stream", events, driver });
+  registry.registerAdapter(adapter);
+  const remote = await registerRemoteA2aPeer({
+    registry, adapter, nodeId: "node-stream", agentId: "remote-stream",
+    cardUrl: "https://peer.example/.well-known/agent-card.json", trustStatus: "trusted",
+  });
+  const session = await adapter.createSession(remote, { conversationId: "stream-conversation", taskId: "local-stream-task" });
+  const response = await adapter.send(
+    session,
+    { intent: "review", content: [{ type: "text", text: "stream this review" }], artifacts: [] },
+    { conversationId: "stream-conversation", taskId: "local-stream-task" },
+  );
+
+  equal(response.content, [{ type: "text", text: "streamed review passed" }]);
+  equal(captured[0]?.message?.taskId, "");
+  const progress = events.list("federation.task_progress");
+  equal(progress.map((event) => (event.data as { kind?: string }).kind), ["task", "artifactUpdate", "statusUpdate"]);
+  equal(events.list("federation.task_sent").length, 1);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
