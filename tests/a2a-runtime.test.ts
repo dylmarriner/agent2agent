@@ -1,5 +1,5 @@
 import { A2A_PROTOCOL_VERSION, Role, type AgentCard, type Message, type SendMessageRequest } from "@a2a-js/sdk";
-import type { A2aClientDriver } from "../packages/a2a/src/index.js";
+import type { A2aClientDriver, A2aClientRequestOptions } from "../packages/a2a/src/index.js";
 import { createControlPlaneRuntime } from "../apps/api/src/runtime.js";
 import { toPublicAgent } from "../apps/api/src/server.js";
 
@@ -48,13 +48,15 @@ function card(): AgentCard {
 await test("runtime discovers configured A2A Agent Cards and supports trust transitions", async () => {
   const resolvedUrls: string[] = [];
   let captured: SendMessageRequest | undefined;
+  let capturedOptions: A2aClientRequestOptions | undefined;
   const driver: A2aClientDriver = {
     async resolveAgentCard(cardUrl) {
       resolvedUrls.push(cardUrl);
       return card();
     },
-    async sendMessage(_card, request) {
+    async sendMessage(_card, request, options) {
       captured = request;
+      capturedOptions = options;
       return {
         role: Role.ROLE_AGENT,
         messageId: "reply-1",
@@ -73,10 +75,12 @@ await test("runtime discovers configured A2A Agent Cards and supports trust tran
     enableAcp: false,
     a2aClientDriver: driver,
     env: {
+      A2A_REVIEWER_TOKEN: "peer-secret-token",
       AGENT2AGENT_A2A_PEERS_JSON: JSON.stringify([{
         id: "remote-reviewer",
         cardUrl: "https://peer.example/.well-known/agent-card.json",
         trustStatus: "pending-trust",
+        bearerTokenEnv: "A2A_REVIEWER_TOKEN",
       }]),
     },
   });
@@ -86,6 +90,7 @@ await test("runtime discovers configured A2A Agent Cards and supports trust tran
   equal(pending.adapterType, "a2a");
   equal(pending.status, "degraded");
   equal(toPublicAgent(pending).supportsA2a, true);
+  equal(JSON.stringify(pending.metadata).includes("peer-secret-token"), false);
 
   const trusted = await runtime.trustAgent("remote-reviewer", "trusted");
   equal(trusted.status, "idle");
@@ -102,6 +107,7 @@ await test("runtime discovers configured A2A Agent Cards and supports trust tran
   equal(captured?.message?.contextId, "conversation-remote");
   equal(captured?.message?.taskId, "");
   equal(captured?.message?.metadata?.["agent2agent.localTaskId"], "local-task");
+  equal(capturedOptions?.bearerToken, "peer-secret-token");
 
   const disabled = await runtime.trustAgent("remote-reviewer", "disabled");
   equal(disabled.status, "disabled");
@@ -109,8 +115,8 @@ await test("runtime discovers configured A2A Agent Cards and supports trust tran
   await runtime.close();
 });
 
-await test("runtime rejects malformed A2A peer configuration before network discovery", async () => {
-  let message = "";
+await test("runtime rejects malformed or unresolved A2A peer secrets before network discovery", async () => {
+  let malformedMessage = "";
   try {
     await createControlPlaneRuntime({
       nodeId: "runtime-a2a-invalid",
@@ -124,9 +130,33 @@ await test("runtime rejects malformed A2A peer configuration before network disc
       env: { AGENT2AGENT_A2A_PEERS_JSON: '[{"id":"peer"}]' },
     });
   } catch (error) {
-    message = error instanceof Error ? error.message : String(error);
+    malformedMessage = error instanceof Error ? error.message : String(error);
   }
-  equal(/cardUrl/i.test(message), true);
+  equal(/cardUrl/i.test(malformedMessage), true);
+
+  let secretMessage = "";
+  try {
+    await createControlPlaneRuntime({
+      nodeId: "runtime-a2a-missing-secret",
+      autoInstall: false,
+      enableAcp: false,
+      a2aClientDriver: {
+        async resolveAgentCard() { throw new Error("network discovery should not run"); },
+        async sendMessage() { throw new Error("unused"); },
+        async cancelTask() {},
+      },
+      env: {
+        AGENT2AGENT_A2A_PEERS_JSON: JSON.stringify([{
+          id: "peer",
+          cardUrl: "https://peer.example/.well-known/agent-card.json",
+          bearerTokenEnv: "MISSING_A2A_TOKEN",
+        }]),
+      },
+    });
+  } catch (error) {
+    secretMessage = error instanceof Error ? error.message : String(error);
+  }
+  equal(/MISSING_A2A_TOKEN|bearerTokenEnv/i.test(secretMessage), true);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
