@@ -4,6 +4,7 @@ import type { CollaborationIntent, CollectiveEvent, RegisteredAgent } from "../.
 import type { AcpTrustStatus } from "../../../packages/acp/src/index.js";
 import type { ControlPlaneRuntime } from "./runtime.js";
 import { bearerTokenMatches } from "./security.js";
+import { registerA2aRoutes } from "./a2a.js";
 
 export type { ControlPlaneRuntime } from "./runtime.js";
 
@@ -18,6 +19,7 @@ export interface PublicAgentDto {
   trustStatus: AcpTrustStatus | "trusted";
   version?: string;
   authStatus?: string;
+  supportsA2a: boolean;
   supportsAcp: boolean;
   supportsMcp: boolean;
   supportsStreaming: boolean;
@@ -28,6 +30,7 @@ export interface PublicAgentDto {
 
 export interface ApiServerOptions {
   apiToken?: string;
+  a2aBaseUrl?: string;
 }
 
 const collaborationIntents = new Set<CollaborationIntent>([
@@ -39,9 +42,11 @@ const collaborationIntents = new Set<CollaborationIntent>([
 export function buildApiServer(runtime: ControlPlaneRuntime, options: ApiServerOptions = {}): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
   const apiToken = options.apiToken?.trim() || undefined;
+  const a2aBaseUrl = options.a2aBaseUrl?.trim() || "http://127.0.0.1:8787";
 
   if (apiToken) {
     app.addHook("onRequest", async (request, reply) => {
+      if (isPublicDiscoveryRequest(request)) return;
       const authorization = typeof request.headers.authorization === "string" ? request.headers.authorization : undefined;
       if (bearerTokenMatches(authorization, apiToken)) return;
       reply.header("www-authenticate", "Bearer realm=\"agent2agent\"");
@@ -54,7 +59,7 @@ export function buildApiServer(runtime: ControlPlaneRuntime, options: ApiServerO
     const isCollective = error instanceof CollectiveError;
     const statusCode = isCollective
       ? error.code.endsWith("not_found") || error.code === "agent_not_found" ? 404 : 400
-      : /not backed by a discovered ACP endpoint|Unknown agent|Unknown conversation/i.test(message) ? 404 : 500;
+      : /not backed by a discovered (?:ACP|A2A) endpoint|Unknown agent|Unknown conversation/i.test(message) ? 404 : 500;
     void reply.code(statusCode).send({
       error: {
         code: isCollective ? error.code : statusCode === 500 ? "internal_error" : "not_found",
@@ -62,6 +67,8 @@ export function buildApiServer(runtime: ControlPlaneRuntime, options: ApiServerO
       },
     });
   });
+
+  registerA2aRoutes(app, runtime, { baseUrl: a2aBaseUrl, requiresBearerAuth: Boolean(apiToken) });
 
   app.get("/api/v1/system/health", async () => ({
     ok: true,
@@ -162,6 +169,10 @@ export function buildApiServer(runtime: ControlPlaneRuntime, options: ApiServerO
   return app;
 }
 
+function isPublicDiscoveryRequest(request: FastifyRequest): boolean {
+  return request.raw.url?.split("?", 1)[0] === "/.well-known/agent-card.json";
+}
+
 function streamEvents(request: FastifyRequest, reply: FastifyReply, runtime: ControlPlaneRuntime, replay: CollectiveEvent[]): void {
   reply.hijack();
   reply.raw.writeHead(200, {
@@ -206,6 +217,7 @@ export function toPublicAgent(agent: RegisteredAgent): PublicAgentDto {
     trustStatus: metadataTrust(metadata.trustStatus),
     ...(typeof metadata.version === "string" ? { version: metadata.version } : {}),
     ...(typeof metadata.authStatus === "string" ? { authStatus: metadata.authStatus } : {}),
+    supportsA2a: metadata.supportsA2a === true,
     supportsAcp: metadata.supportsAcp === true,
     supportsMcp: metadata.supportsMcp === true,
     supportsStreaming: metadata.supportsStreaming === true,

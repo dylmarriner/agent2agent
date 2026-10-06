@@ -298,7 +298,7 @@ export type CollectiveEventType =
   | "knowledge.proposed" | "knowledge.validated" | "knowledge.promoted"
   | "benchmark.started" | "benchmark.completed" | "candidate.promoted" | "candidate.rejected"
   | "package.installed" | "package.updated"
-  | "federation.peer_connected" | "federation.task_sent" | "federation.task_received" | "federation.failed";
+  | "federation.peer_connected" | "federation.task_sent" | "federation.task_progress" | "federation.task_received" | "federation.failed";
 
 export interface CollectiveEvent<T = unknown> {
   id: string;

@@ -15,6 +15,7 @@ export interface ConversationRecord {
 }
 
 export interface CreateConversationInput {
+  id?: string;
   title: string;
   objective: string;
   participantIds: string[];
@@ -107,8 +108,14 @@ export class ConversationRuntime {
     if (!participantIds.some((participantId) => !participantId.startsWith("human:"))) {
       throw new CollectiveError("conversation_participants", "Conversation requires at least one non-human participant");
     }
+    const explicitId = input.id?.trim();
+    if (input.id !== undefined && !explicitId) throw new CollectiveError("conversation_id", "Conversation id cannot be empty");
+    const conversationId = explicitId ?? this.options.id("conversation");
+    if (await this.options.repository.getConversation(conversationId)) {
+      throw new CollectiveError("conversation_exists", `Conversation ${conversationId} already exists`);
+    }
     const record: ConversationRecord = {
-      id: this.options.id("conversation"),
+      id: conversationId,
       nodeId: this.options.nodeId,
       title: input.title.trim(),
       objective: input.objective.trim(),

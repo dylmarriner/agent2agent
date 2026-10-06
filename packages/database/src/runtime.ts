@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS a2a_runtime_messages (
   recipient_participant_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
   intent text NOT NULL,
   task_id text,
-  parent_message_id text REFERENCES a2a_runtime_messages(id) ON DELETE SET NULL,
+  parent_message_id text,
   correlation_id text NOT NULL,
   round integer NOT NULL CHECK (round >= 0),
   sequence bigint NOT NULL CHECK (sequence >= 1),
@@ -49,7 +49,11 @@ CREATE TABLE IF NOT EXISTS a2a_runtime_messages (
   artifacts jsonb NOT NULL DEFAULT '[]'::jsonb,
   routing_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL,
-  UNIQUE (conversation_id, sequence)
+  UNIQUE (conversation_id, sequence),
+  UNIQUE (conversation_id, id),
+  CONSTRAINT a2a_runtime_messages_parent_same_conversation_fk
+    FOREIGN KEY (conversation_id, parent_message_id)
+    REFERENCES a2a_runtime_messages(conversation_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS a2a_runtime_messages_conversation_created_idx
